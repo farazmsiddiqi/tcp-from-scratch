@@ -16,7 +16,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
-
+#define MAXDATASIZE 500000
 
 struct sockaddr_in si_me, si_other;
 int s, slen;
@@ -26,6 +26,22 @@ void diep(char *s) {
     exit(1);
 }
 
+int write_to_file(char *buf, char *fname) {
+    FILE *fp;
+    int bytes_written;
+    size_t buf_len = strlen(buf);
+
+    fp = fopen(fname, "wb");
+    if (fp == NULL) {
+        perror("fopen");
+        exit(1);
+    }
+
+    bytes_written = fwrite(buf, sizeof(char), buf_len, fp);
+    fclose(fp);
+
+    return bytes_written;
+}
 
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
@@ -45,16 +61,28 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
         diep("bind");
 
 
-	/* Now receive data and send acknowledgements */    
+	/* Now receive data and send acknowledgements */   
+    char* buffer = calloc(1, MAXDATASIZE);    
+    size_t numBytesRecieved = 0;
+    struct sockaddr addr;
+    socklen_t fromlen = sizeof(addr);
+
+    if((numBytesRecieved = recvfrom(s, buffer, MAXDATASIZE-1, 0, &addr, &fromlen)) == -1) {
+        free(buffer);
+        exit(1);
+    }
+
+    if(numBytesRecieved != write_to_file(buffer, destinationFile)) {
+        free(buffer);
+        exit(1);
+    }
 
     close(s);
 	printf("%s received.", destinationFile);
     return;
 }
 
-/*
- * 
- */
+
 int main(int argc, char** argv) {
 
     unsigned short int udpPort;
@@ -68,4 +96,3 @@ int main(int argc, char** argv) {
 
     reliablyReceive(udpPort, argv[2]);
 }
-

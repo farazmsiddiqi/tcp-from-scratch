@@ -1,8 +1,6 @@
 /* 
  * File:   sender_main.c
- * Author: 
- *
- * Created on 
+ * Author: farazms2, nvk4
  */
 
 #include <stdio.h>
@@ -20,6 +18,8 @@
 #include <string.h>
 #include <sys/time.h>
 
+#define MAXDATASIZE 500000
+
 struct sockaddr_in si_other;
 int s, slen;
 
@@ -32,6 +32,7 @@ void diep(char *s) {
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* filename, unsigned long long int bytesToTransfer) {
     //Open the file
     FILE *fp;
+    char* buffer = NULL;
     fp = fopen(filename, "rb");
     if (fp == NULL) {
         printf("Could not open file to send.");
@@ -53,13 +54,27 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         exit(1);
     }
 
+    
+    // read bytesToTransfer bytes from file to buffer
+    buffer = calloc(1, MAXDATASIZE);
+    size_t bytesRead = fread(buffer, 1, bytesToTransfer, fp);
+    if (bytesRead != bytesToTransfer) {
+        perror("Failed to read the specified number of bytes");
+        free(buffer);
+        fclose(fp);
+        exit(1);
+    }
 
 	/* Send data and receive acknowledgements on s*/
+    size_t numBytesSent = 0;
+    if((numBytesSent = sendto(s, buffer, strlen(buffer), 0, (struct sockaddr *) &si_other, slen)) == -1) {
+        exit(1);
+    }
 
     printf("Closing the socket\n");
+    free(buffer);
     close(s);
     return;
-
 }
 
 /*
@@ -84,5 +99,3 @@ int main(int argc, char** argv) {
 
     return (EXIT_SUCCESS);
 }
-
-
