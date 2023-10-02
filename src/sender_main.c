@@ -57,6 +57,12 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     
     // read bytesToTransfer bytes from file to buffer
     buffer = calloc(1, MAXDATASIZE);
+    fseek(fp, 0L, SEEK_END);
+    unsigned long long int sizeOfFile = ftell(fp);
+    rewind(fp);
+    if(bytesToTransfer > sizeOfFile) {
+        bytesToTransfer = sizeOfFile;
+    }
     size_t bytesRead = fread(buffer, 1, bytesToTransfer, fp);
     if (bytesRead != bytesToTransfer) {
         perror("Failed to read the specified number of bytes");
@@ -91,8 +97,6 @@ int main(int argc, char** argv) {
     }
     udpPort = (unsigned short int) atoi(argv[2]);
     numBytes = atoll(argv[4]);
-
-
 
     reliablyTransfer(argv[1], udpPort, argv[3], numBytes);
 

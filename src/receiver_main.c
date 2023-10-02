@@ -62,17 +62,30 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
 
 	/* Now receive data and send acknowledgements */   
-    char* buffer = calloc(1, MAXDATASIZE);    
-    size_t numBytesRecieved = 0;
+    char* buffer = calloc(1, MAXDATASIZE); 
+    size_t num_bytes_in_response = 0;   
+    size_t num_bytes_recieved = 0;
     struct sockaddr addr;
     socklen_t fromlen = sizeof(addr);
 
-    if((numBytesRecieved = recvfrom(s, buffer, MAXDATASIZE-1, 0, &addr, &fromlen)) == -1) {
+    if((num_bytes_in_response = recvfrom(s, buffer, MAXDATASIZE-1, 0, &addr, &fromlen)) == -1) {
         free(buffer);
         exit(1);
     }
 
-    if(numBytesRecieved != write_to_file(buffer, destinationFile)) {
+    while ((num_bytes_in_response = recvfrom(s, &buffer[num_bytes_recieved], MAXDATASIZE-1, 0, &addr, &fromlen)) > 0) {
+        num_bytes_recieved += num_bytes_in_response;
+        printf("recieved %ld bytes. buffer is now %ld bytes long\n", num_bytes_in_response, num_bytes_recieved);
+    }
+
+    if (num_bytes_in_response == -1) {
+        perror("recvfrom returned -1");
+        free(buffer);
+        exit(1);
+    }
+
+    if(num_bytes_in_response != write_to_file(buffer, destinationFile)) {
+        perror("file len != buffer len");
         free(buffer);
         exit(1);
     }
