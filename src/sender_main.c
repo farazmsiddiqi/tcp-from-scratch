@@ -19,7 +19,7 @@
 #include <sys/time.h>
 
 #define MAXDATASIZE 500000
-#define CHUNKSIZE 1000
+#define PAYLOADSIZE 1000
 #define CONTROLBITLENGTH 20
 
 struct sockaddr_in si_other;
@@ -40,6 +40,11 @@ double _ceil(double num) {
     } else {
         return integerPart;
     }
+}
+
+
+int min(int a, int b) {
+    return (a < b) ? a : b;
 }
 
 
@@ -87,43 +92,34 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         exit(1);
     }
 
-	/* Send data and receive acknowledgements on s*/
-    size_t numBytesSent = 0;
-    if((numBytesSent = sendto(s, buffer, strlen(buffer), 0, (struct sockaddr *) &si_other, slen)) == -1) {
-        exit(1);
-    }
-
     // send data from buffer in chunks via sendto()
     size_t total_bytes_sent = 0;
     // total to send = buflen + (numchunks that we will send) * (control bits per chunk)
-    size_t total_bytes_to_send = strlen(buffer) + _ceil(( (double) strlen(buffer) ) / CHUNKSIZE)*CONTROLBITLENGTH;
-    size_t chunk_bytes_sent = 0;
+    size_t total_bytes_to_send = strlen(buffer) + _ceil(( (double) strlen(buffer) ) / PAYLOADSIZE)*CONTROLBITLENGTH;
+    size_t total_bytes_read_from_buffer = 0;
 
     char control_buf[CONTROLBITLENGTH];
     // CHUNKSIZE+1 is the payload and null terminator
     // CONTROLBITLENGTH is the num bits we have in each chunk to enforce selective ACK protocol.
-    char chunk_buf[CONTROLBITLENGTH + CHUNKSIZE+1];
-    chunk_buf[CONTROLBITLENGTH + CHUNKSIZE] = '\0';
+    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
+    chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE] = '\0';
 
     // populate chunk buf from buffer
     while (total_bytes_sent != total_bytes_to_send) {
-        memset(chunk_buf, 0, CONTROLBITLENGTH + CHUNKSIZE);
-
-        // if the payload+control of chunk is greater than the total bytes we need to send, send less bytes in chunk.
-        // this case is hit on the last chunk in the packet.
-        int bytes_to_send_for_chunk = CONTROLBITLENGTH + CHUNKSIZE;
-        if (total_bytes_sent + CHUNKSIZE+CONTROLBITLENGTH > total_bytes_to_send) {
-            bytes_to_send_for_chunk = total_bytes_to_send - total_bytes_sent + CONTROLBITLENGTH;
-        }
+        memset(chunk_buf, 0, CONTROLBITLENGTH + PAYLOADSIZE);
 
         // populate chunk_buf with control bits and payload
         memset(control_buf, 0, CONTROLBITLENGTH);
         sprintf(control_buf, "%ld", strlen(buffer));
         memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
-        memcpy(chunk_buf, &buffer[CONTROLBITLENGTH + total_bytes_sent], bytes_to_send_for_chunk);
+        // last chunk will not require full PAYLOADSIZE to send.
+        size_t bytes_of_buff_to_send = min(PAYLOADSIZE, strlen(buffer) - total_bytes_read_from_buffer);
+        memcpy(&chunk_buf[CONTROLBITLENGTH], &buffer[total_bytes_read_from_buffer], bytes_of_buff_to_send);
 
         // send chunk, and make sure that full chunk is sent via while loop.
         size_t ctr = 0;
+        size_t chunk_bytes_sent = 0;
+        size_t bytes_to_send_for_chunk = bytes_of_buff_to_send + CONTROLBITLENGTH;
         while(chunk_bytes_sent != bytes_to_send_for_chunk) {
             if((chunk_bytes_sent += sendto(s, &chunk_buf[chunk_bytes_sent], bytes_to_send_for_chunk-chunk_bytes_sent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
                     perror("chunk sending failure.\n");
@@ -135,9 +131,9 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 
             ++ctr;
         }
-
-        total_bytes_sent += bytes_to_send_for_chunk;
-        chunk_bytes_sent = 0;
+        
+        total_bytes_read_from_buffer += bytes_of_buff_to_send;
+        total_bytes_sent += chunk_bytes_sent;
     }
 
     printf("Closing the socket\n");

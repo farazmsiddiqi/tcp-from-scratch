@@ -68,11 +68,6 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     struct sockaddr addr;
     socklen_t fromlen = sizeof(addr);
 
-    if((num_bytes_in_response = recvfrom(s, buffer, MAXDATASIZE-1, 0, &addr, &fromlen)) == -1) {
-        free(buffer);
-        exit(1);
-    }
-
     while ((num_bytes_in_response = recvfrom(s, &buffer[num_bytes_recieved], MAXDATASIZE-1, 0, &addr, &fromlen)) > 0) {
         num_bytes_recieved += num_bytes_in_response;
         printf("recieved %ld bytes. buffer is now %ld bytes long\n", num_bytes_in_response, num_bytes_recieved);
