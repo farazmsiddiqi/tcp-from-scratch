@@ -112,7 +112,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         memset(control_buf, 0, CONTROLBITLENGTH);
         sprintf(control_buf, "%ld", strlen(buffer));
         memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
-        // last chunk will not require full PAYLOADSIZE to send.
+        // last chunk will not require full PAYLOADSIZE to send, so send only as many bytes as necessary.
         size_t bytes_of_buff_to_send = min(PAYLOADSIZE, strlen(buffer) - total_bytes_read_from_buffer);
         memcpy(&chunk_buf[CONTROLBITLENGTH], &buffer[total_bytes_read_from_buffer], bytes_of_buff_to_send);
 
