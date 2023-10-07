@@ -15,11 +15,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdbool.h>
 
 #define MAXDATASIZE 500000
+#define PAYLOADSIZE 500
+#define CONTROLBITLENGTH 20
 
 struct sockaddr_in si_me, si_other;
 int s, slen;
+struct sockaddr addr;
+socklen_t fromlen = sizeof(addr);
 
 void diep(char *s) {
     perror(s);
@@ -43,6 +48,97 @@ int write_to_file(char *buf, char *fname) {
     return bytes_written;
 }
 
+/*
+Recieve SYN packet
+Send SYN/ACK
+Wait for ACK else re-send SYN/ACK
+
+Recieve FIN packet
+Send FIN/ACK
+Wait for ACK else re-send FIN/ACK
+*/
+
+void openConnection(char *chunk_buf) {
+    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+    int currentBytesSent = 0;
+    int currentBytesRecieved = 0;
+
+    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+    sprintf(chunk_buf, "%s", "SYN/ACK");
+    while(currentBytesSent != totalBytesChunk) {
+        if ((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk-currentBytesSent, 0, &addr, fromlen)) == -1) {
+            perror("recvfrom returned -1");
+            free(chunk_buf);
+            exit(1);
+        }
+    }
+
+
+    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+    bool ACKRecieved = false;
+    while(!ACKRecieved) {
+        while(currentBytesRecieved != totalBytesChunk) {
+            if ((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk-currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+                perror("recvfrom returned -1");
+                free(chunk_buf);
+                exit(1);
+            }
+        }
+        if(strstr(chunk_buf, "ACK") != NULL) {
+            ACKRecieved = true;
+        }
+    }
+}
+
+void closeConnection(char *chunk_buf) {
+    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+    int currentBytesSent = 0;
+    int currentBytesRecieved = 0;
+
+    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+    sprintf(chunk_buf, "%s", "FIN/ACK");
+    while(currentBytesSent != totalBytesChunk) {
+        if ((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk-currentBytesSent, 0, &addr, fromlen)) == -1) {
+            perror("recvfrom returned -1");
+            free(chunk_buf);
+            exit(1);
+        }
+    }
+
+
+    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+    bool ACKRecieved = false;
+    while(!ACKRecieved) {
+        while(currentBytesRecieved != totalBytesChunk) {
+            if ((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk-currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+                perror("recvfrom returned -1");
+                free(chunk_buf);
+                exit(1);
+            }
+        }
+        if(strstr(chunk_buf, "ACK") != NULL) {
+            ACKRecieved = true;
+        }
+    }
+}
+
+bool parseMessage(char *chunk_buf, char *data_buf, int num_chunks_recieved_total, bool * connectionClose) {
+    if(strstr(chunk_buf, "SYN") != NULL) {
+        openConnection(chunk_buf);
+        return true;
+    }
+    else if(strstr(chunk_buf, "FIN") != NULL) {
+        closeConnection(chunk_buf);
+        *connectionClose = true;
+        return true;
+    }
+    else {
+        memcpy(&data_buf[num_chunks_recieved_total*PAYLOADSIZE], &chunk_buf[CONTROLBITLENGTH], PAYLOADSIZE);
+        chunk_buf[CONTROLBITLENGTH] = '\0';
+        return false;
+    }
+}
+
 
 void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     
@@ -63,23 +159,45 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
 	/* Now receive data and send acknowledgements */   
     char* buffer = calloc(1, MAXDATASIZE); 
-    size_t num_bytes_in_response = 0;   
-    size_t num_bytes_recieved = 0;
-    struct sockaddr addr;
-    socklen_t fromlen = sizeof(addr);
+    //Number of bytes recieved in a single recv call
+    size_t num_bytes_response_chunk = 0; 
+    //Number of bytes expected in each packet
+    size_t num_bytes_expected_chunk = CONTROLBITLENGTH + PAYLOADSIZE;  
+    //Number of bytes recieved in all recv calls for a single check 
+    size_t num_bytes_recieved_chunk = 0;
+    //Number of bytes recieved in the whole connection 
+    size_t num_bytes_recieved_total = 0;
+    //Number of chunks recieved in the whole connection
+    size_t num_chunks_recieved_total = 0;
 
-    while ((num_bytes_in_response = recvfrom(s, &buffer[num_bytes_recieved], MAXDATASIZE-1, 0, &addr, &fromlen)) > 0) {
-        num_bytes_recieved += num_bytes_in_response;
-        printf("recieved %ld bytes. buffer is now %ld bytes long\n", num_bytes_in_response, num_bytes_recieved);
+    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
+    bool closeConnection = false;
+    //Continue untill connection close process is done
+    while(!closeConnection) {
+        //read bytes unto chunk safely 
+        memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+        while(num_bytes_recieved_chunk != num_bytes_expected_chunk) {
+            if ((num_bytes_response_chunk = recvfrom(s, &chunk_buf[num_bytes_recieved_chunk], num_bytes_expected_chunk-num_bytes_recieved_chunk, 0, &addr, &fromlen)) == -1) {
+                perror("recvfrom returned -1");
+                free(buffer);
+                exit(1);
+            }
+            num_bytes_recieved_chunk += num_bytes_response_chunk;
+        }
+
+        //Extract data and control bits and write to main data buffer
+        if(!parseMessage(chunk_buf, buffer, num_chunks_recieved_total,&closeConnection)) {
+            //distiguish between data and control 
+            num_chunks_recieved_total += 1;
+            num_bytes_recieved_total += num_bytes_expected_chunk;
+        }
+        //Reset for next iteration
+        num_bytes_response_chunk = 0;
+        num_bytes_recieved_chunk = 0;
     }
 
-    if (num_bytes_in_response == -1) {
-        perror("recvfrom returned -1");
-        free(buffer);
-        exit(1);
-    }
-
-    if(num_bytes_in_response != write_to_file(buffer, destinationFile)) {
+    //Write to file
+    if(num_chunks_recieved_total*PAYLOADSIZE <= write_to_file(buffer, destinationFile)) {
         perror("file len != buffer len");
         free(buffer);
         exit(1);
