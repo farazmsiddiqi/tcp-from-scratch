@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <sys/time.h>
+#include <errno.h>
 
 #define MAXDATASIZE 500000
 #define PAYLOADSIZE 500
@@ -51,44 +52,22 @@ int min(int a, int b) {
 }
 
 /*
+Packets have sequence number
 Send SYN packet
 Wait for SYN/ACK packet for 1 second else go back to previous step 
 Send ACK packet 
+Wait for a SYN/ACK packet for 1 second else go back to previous step
 */
-void createConnection() {
-    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
-    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+void SYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
     int currentBytesSent = 0;
-    int currentBytesRecieved = 0;
-
-    //SYN
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "SYN");
-    while(currentBytesSent != totalBytesChunk) {
-        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-            perror("chunk sending failure.\n");
-            exit(1);
-        }
+    if(SYNMessage) {
+        sprintf(chunk_buf, "%s", "SYN");
     }
-    currentBytesSent = 0;
-
-    //ACK/SYN
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    bool ACKReceived = false;
-    while(!ACKReceived) {
-        while(currentBytesRecieved != totalBytesChunk) {
-            if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-                perror("chunk sending failure.\n");
-                exit(1);
-            }
-        }
-        if(strstr(chunk_buf, "SYN/ACK") != NULL) {
-            ACKReceived = true;
-        }
+    else {
+        sprintf(chunk_buf, "%s", "FIN");
     }
 
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "ACK");
     while(currentBytesSent != totalBytesChunk) {
         if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
             perror("chunk sending failure.\n");
@@ -96,50 +75,128 @@ void createConnection() {
         }
     }
 }
-/*
-Send FIN packet
-Wait for FIN/ACK packet for 1 second else go back to previous step 
-Send ACK packet 
-*/
-void closeConnection() {
-    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
-    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
-    int currentBytesSent = 0;
-    int currentBytesRecieved = 0;
 
-    //SYN
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "FIN");
-    while(currentBytesSent != totalBytesChunk) {
-        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-            perror("chunk sending failure.\n");
-            exit(1);
-        }
-    }
-    currentBytesSent = 0;
-
-    //ACK/SYN
+bool ACKSYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage, bool finalCheck) {
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
     bool ACKReceived = false;
+
     while(!ACKReceived) {
+        int currentBytesRecieved = 0;
         while(currentBytesRecieved != totalBytesChunk) {
             if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                    // handle timeout
+                    printf("recvfrom() timed out\n");
+                    ACKReceived = false;
+                    break;
+                } else {
+                    // handle other errors
+                    perror("chunk sending failure.\n");
+                    exit(1);
+                }
+            }
+        }
+        //parsing response
+        if(SYNMessage) {
+            if(strstr(chunk_buf, "SYN/ACK") != NULL) {
+                ACKReceived = true;
+            }
+        }
+        else {
+            if(strstr(chunk_buf, "FIN/ACK") != NULL) {
+                ACKReceived = true;
+            }
+        }
+
+        //next steps go back to sending SYN/FIN or decide to re-send ACK
+        if(!finalCheck && !ACKReceived) {
+            SYNFIN(chunk_buf, totalBytesChunk, SYNMessage);
+        }
+        else if(finalCheck && ACKReceived) {
+            return true;
+        }
+        if(finalCheck && !ACKReceived) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ACK(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
+    do {
+        int currentBytesSent = 0;
+        memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+        sprintf(chunk_buf, "%s", "ACK");
+        while(currentBytesSent != totalBytesChunk) {
+            if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
                 perror("chunk sending failure.\n");
                 exit(1);
             }
         }
-        if(strstr(chunk_buf, "FIN/ACK") != NULL) {
-            ACKReceived = true;
-        }
+    } while(ACKSYNFIN(chunk_buf, totalBytesChunk, SYNMessage, true));
+    //check for ACK/SYN
+}
+void createConnection() {
+    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
+    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+
+    // Set timeout
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    timeout.tv_usec = 40000; // and microseconds
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
     }
 
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "ACK");
-    while(currentBytesSent != totalBytesChunk) {
-        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-            perror("chunk sending failure.\n");
-            exit(1);
-        }
+    //SYN
+    SYNFIN(chunk_buf, totalBytesChunk, true);
+
+    //ACK/SYN
+    ACKSYNFIN(chunk_buf, totalBytesChunk, true, false);
+
+    //ACK
+    ACK(chunk_buf, totalBytesChunk, true);
+
+    // Reset timeout (set to 0 for a non-blocking call)
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
+    }
+}
+
+/*
+Send FIN packet
+Wait for FIN/ACK packet for 1 second else go back to previous step 
+Send ACK packet 
+Wait for FIN/ACK message for 1 second and if none is recieved continue  
+*/
+
+void closeConnection() {
+    char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
+    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    timeout.tv_usec = 40000; // and microseconds
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
+    }
+
+    //FIN
+    SYNFIN(chunk_buf, totalBytesChunk, false);
+
+    //ACK/FIN
+    ACKSYNFIN(chunk_buf, totalBytesChunk, false, false);
+
+    //ACK
+    ACK(chunk_buf, totalBytesChunk, false);
+
+    // Reset timeout (set to 0 for a non-blocking call)
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
     }
 }
 

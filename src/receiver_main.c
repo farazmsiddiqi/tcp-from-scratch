@@ -16,6 +16,10 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/time.h>
+#include <errno.h>
 
 #define MAXDATASIZE 500000
 #define PAYLOADSIZE 500
@@ -51,20 +55,23 @@ int write_to_file(char *buf, char *fname) {
 /*
 Recieve SYN packet
 Send SYN/ACK
-Wait for ACK else re-send SYN/ACK
+Wait for ACK for 40 millesecond else re-send SYN/ACK
 
 Recieve FIN packet
 Send FIN/ACK
-Wait for ACK else re-send FIN/ACK
+Wait for ACK for 40 millesecond else re-send FIN/ACK
 */
 
-void openConnection(char *chunk_buf) {
-    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+void SYNFINACK(char * chunk_buf, int totalBytesChunk, bool SYNMessage) {
     int currentBytesSent = 0;
-    int currentBytesRecieved = 0;
-
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "SYN/ACK");
+    if(SYNMessage) {
+        sprintf(chunk_buf, "%s", "SYN/ACK");
+    }
+    else {
+        sprintf(chunk_buf, "%s", "FIN/ACK");
+    }
+
     while(currentBytesSent != totalBytesChunk) {
         if ((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk-currentBytesSent, 0, &addr, fromlen)) == -1) {
             perror("recvfrom returned -1");
@@ -72,53 +79,82 @@ void openConnection(char *chunk_buf) {
             exit(1);
         }
     }
+}
 
-
+void ACK(char * chunk_buf, int totalBytesChunk, bool SYNMessage) {
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
     bool ACKRecieved = false;
+
     while(!ACKRecieved) {
+        int currentBytesRecieved = 0;
         while(currentBytesRecieved != totalBytesChunk) {
             if ((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk-currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-                perror("recvfrom returned -1");
-                free(chunk_buf);
-                exit(1);
+                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                    // handle timeout
+                    printf("recvfrom() timed out\n");
+                    ACKRecieved = false;
+                    break;
+                } else {
+                    // handle other errors
+                    perror("chunk sending failure.\n");
+                    exit(1);
+                }
             }
         }
         if(strstr(chunk_buf, "ACK") != NULL) {
             ACKRecieved = true;
         }
+        else {
+            SYNFINACK(chunk_buf, totalBytesChunk, SYNMessage);
+        }
+    }
+}
+
+void openConnection(char *chunk_buf) {
+    int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
+
+    // Set timeout
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    timeout.tv_usec = 40000; // and microseconds
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
+    }
+
+    //TCP
+    SYNFINACK(chunk_buf, totalBytesChunk, true);
+
+    ACK(chunk_buf, totalBytesChunk, true);
+
+    // Reset timeout (set to 0 for a non-blocking call)
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
     }
 }
 
 void closeConnection(char *chunk_buf) {
     int totalBytesChunk = CONTROLBITLENGTH + PAYLOADSIZE;
-    int currentBytesSent = 0;
-    int currentBytesRecieved = 0;
 
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    sprintf(chunk_buf, "%s", "FIN/ACK");
-    while(currentBytesSent != totalBytesChunk) {
-        if ((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk-currentBytesSent, 0, &addr, fromlen)) == -1) {
-            perror("recvfrom returned -1");
-            free(chunk_buf);
-            exit(1);
-        }
+     // Set timeout
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    timeout.tv_usec = 40000; // and microseconds
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
     }
 
+    //TCP 
+    SYNFINACK(chunk_buf, totalBytesChunk, false);
 
-    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-    bool ACKRecieved = false;
-    while(!ACKRecieved) {
-        while(currentBytesRecieved != totalBytesChunk) {
-            if ((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk-currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-                perror("recvfrom returned -1");
-                free(chunk_buf);
-                exit(1);
-            }
-        }
-        if(strstr(chunk_buf, "ACK") != NULL) {
-            ACKRecieved = true;
-        }
+    ACK(chunk_buf, totalBytesChunk, false);
+
+    // Reset timeout (set to 0 for a non-blocking call)
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
     }
 }
 
