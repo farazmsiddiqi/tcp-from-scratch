@@ -81,7 +81,7 @@ void SYNFINACK(char * chunk_buf, int totalBytesChunk, bool SYNMessage) {
     }
 }
 
-void ACK(char * chunk_buf, int totalBytesChunk, bool SYNMessage) {
+void RECV_ACK(char * chunk_buf, int totalBytesChunk, bool SYNMessage) {
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
     bool ACKRecieved = false;
 
@@ -124,7 +124,7 @@ void openConnection(char *chunk_buf) {
     //TCP
     SYNFINACK(chunk_buf, totalBytesChunk, true);
 
-    ACK(chunk_buf, totalBytesChunk, true);
+    RECV_ACK(chunk_buf, totalBytesChunk, true);
 
     // Reset timeout (set to 0 for a non-blocking call)
     timeout.tv_sec = 0;
@@ -148,7 +148,7 @@ void closeConnection(char *chunk_buf) {
     //TCP 
     SYNFINACK(chunk_buf, totalBytesChunk, false);
 
-    ACK(chunk_buf, totalBytesChunk, false);
+    RECV_ACK(chunk_buf, totalBytesChunk, false);
 
     // Reset timeout (set to 0 for a non-blocking call)
     timeout.tv_sec = 0;

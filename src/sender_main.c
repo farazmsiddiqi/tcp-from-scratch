@@ -69,7 +69,7 @@ void SYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
     }
 
     while(currentBytesSent != totalBytesChunk) {
-        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
+        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk - currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
             perror("chunk sending failure.\n");
             exit(1);
         }
@@ -83,7 +83,7 @@ bool ACKSYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage, bool final
     while(!ACKReceived) {
         int currentBytesRecieved = 0;
         while(currentBytesRecieved != totalBytesChunk) {
-            if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+            if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk - currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
                 if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
                     // handle timeout
                     printf("recvfrom() timed out\n");
@@ -128,7 +128,7 @@ void ACK(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
         memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
         sprintf(chunk_buf, "%s", "ACK");
         while(currentBytesSent != totalBytesChunk) {
-            if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
+            if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk - currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
                 perror("chunk sending failure.\n");
                 exit(1);
             }
