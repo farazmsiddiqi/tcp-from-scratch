@@ -22,7 +22,7 @@
 
 #define MAXDATASIZE 500000
 #define PAYLOADSIZE 500
-#define CONTROLBITLENGTH 20
+#define CONTROLBITLENGTH 12
 
 struct sockaddr_in si_other;
 int s, slen;
@@ -52,6 +52,53 @@ int min(int a, int b) {
 }
 
 /*
+Reliable data transfer plan TCP sender
+Data Structures
+SST = 100 (50,000 byte mark) or 64
+Duplicate ACK counter 
+DUplicate ACK counter threshold = 10 or 3
+Highest ACK packet sequence number (HACK)
+Congestion window of size 1 of TCP struct 
+File data array with 500 bytes per index 
+Timeout threshold = 5 RTTS (100 ms)
+ENUM for sender state: Slow start, Congestion avoidance, Fast recovery
+TCP struct:
+    Sequence number 
+    Data payload index into file data array
+    Timer 
+Algorithmns 
+UNIVERSAL
+Iterate through window, if timer not started, populate sequence number, data payload index, send packets
+and then start timer. 
+
+SLOW START 
+Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window by 
+current congestion window size + highest ACK seen - new ACK sequence number, reset HACK, mark 
+all packets with sequence number <= newest ACK as completed and shift congestion window. Reset duplicate
+ACK counter to zero. If congestion window size reaches SST then switch to congestion window state.
+Recieve duplicate ACK: Check if ACK sequence number is <= HACK and increment duplicate ACK counter,
+If duplicate ACK counter reaches threshold switch to Fast recovery state. Then, Set SST equal to CW/2.
+Next,set Congestion window size and expand or contract window equal to SST + duplicate ACK count. 
+
+CONGESTION AVOIDANCE 
+Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window by 
+current congestion window size + 1/floor(congestion window size) and repeat (highest ACK seen - new ACK 
+sequence number) times. Set highest ACK seen and mark all packets with sequence number <= newest ACK
+as completed and shift congestion window. Set duplicate ACK counter to zero.
+Recieve duplicate ACK: Same as process in slow start. 
+
+FAST RECOVERY
+Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window to SST.
+Set highest ACK seen and mark all packets with sequence number <= newest ACK as completed and shift congestion window. Set duplicate ACK counter to zero.
+Recieve duplicate ACK: Check if ACK sequence number is <= HACK and increment duplicate ack counter. Next,
+Next expand congestion window by 1. 
+
+UNIVERSAL
+Timeout: Check if any packet in window has reached timer threshold, set SST to be half of CW, truncate CW to be 1,
+set duplicate ACK counter to zero and set mode to SLOW START. Clear timer of only packet remaining.  
+*/
+
+/*
 Packets have sequence number
 Send SYN packet
 Wait for SYN/ACK packet for 1 second else go back to previous step 
@@ -69,7 +116,7 @@ void SYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
     }
 
     while(currentBytesSent != totalBytesChunk) {
-        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk - currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
+        if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
             perror("chunk sending failure.\n");
             exit(1);
         }
@@ -83,7 +130,7 @@ bool ACKSYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage, bool final
     while(!ACKReceived) {
         int currentBytesRecieved = 0;
         while(currentBytesRecieved != totalBytesChunk) {
-            if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk - currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+            if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
                 if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
                     // handle timeout
                     printf("recvfrom() timed out\n");
@@ -128,7 +175,7 @@ void ACK(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
         memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
         sprintf(chunk_buf, "%s", "ACK");
         while(currentBytesSent != totalBytesChunk) {
-            if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk - currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
+            if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
                 perror("chunk sending failure.\n");
                 exit(1);
             }
