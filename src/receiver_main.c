@@ -35,23 +35,6 @@ void diep(char *s) {
     exit(1);
 }
 
-/*
-Reliable data transfer TCP reciever 
-Data structures
-Highest in order packet recieved counter
-Unlimited size out of order packet buffering of packets (sequence number and data struct) 
-Data array with all packet data in order 
-
-Algorithmns 
-Recieve new in-order packet: Check if sequence number = highest-in order packet recieved counter+1. 
-Next increment highest in-order packet recieved counter. Check if OOO buffer can be emptied and update
-highest in-order packet recieved counter. Write packets to data array based on packet recieved and 
-emptied packets from OOO buffer and Send ACK for highest in-order packet.
-Recieve out of-order packet; Check if sequence number > highest-in order packer recieved counter+1. 
-Next store packet contents in out of order array in the correct position. Positions go from highest in-order 
-packet recieved to N. Send ACK for current highest in-order packet recieved 
-*/
-
 int write_to_file(char *buf, char *fname) {
     FILE *fp;
     int bytes_written;

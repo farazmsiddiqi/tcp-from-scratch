@@ -19,11 +19,85 @@
 #include <stdbool.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <time.h>
 
 #define MAXDATASIZE 500000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
+#define SLOWSTARTTHRESHOLD 100
+#define DUPACKTHRESHOLD 3
 
+// TCP struct
+typedef struct {
+    size_t seq_num;
+    char* payload_start;
+    clock_t timer_timestamp;
+} tcp_struct;
+
+// VECTOR IMPLEMENTATION
+typedef struct {
+    tcp_struct* data;
+    size_t size;
+    size_t capacity;
+} vec;
+
+void init_vector(vec* v, size_t initial_capacity) {
+    v->data = (tcp_struct*)malloc(initial_capacity * sizeof(tcp_struct));
+    v->size = 0;
+    v->capacity = initial_capacity;
+}
+
+void free_vector(vec* v) {
+    free(v->data);
+    v->data = NULL;
+    v->size = 0;
+    v->capacity = 0;
+}
+
+void resize_vector(vec* v, size_t new_capacity) {
+    tcp_struct* new_data = (tcp_struct*)malloc(new_capacity * sizeof(tcp_struct));
+    memcpy(new_data, v->data, v->size * sizeof(tcp_struct));
+    free(v->data);
+    v->data = new_data;
+    v->capacity = new_capacity;
+}
+
+void push_back(vec* v, tcp_struct value) {
+    if (v->size == v->capacity) {
+        resize_vector(v, v->capacity * 2);
+    }
+    v->data[v->size++] = value;
+}
+
+tcp_struct get(vec* v, size_t index) {
+    if (index < v->size) {
+        return v->data[index];
+    }
+    printf("GET operation for index: %ld does not exist.", index);
+
+    tcp_struct no_val = {
+        .seq_num = 999,
+        .payload_start = "failure",
+        .timer_timestamp = 0
+    };
+
+    return no_val;
+}
+
+void erase(vec* v, size_t index) {
+    if (index < v->size) {
+        memmove(&v->data[index], &v->data[index + 1], (v->size - index - 1) * sizeof(tcp_struct));
+        v->size--;
+    }
+}
+// END VECTOR IMPLEMENTATION
+
+// TCP vars
+size_t hack;
+double CW = 1;
+vec packet_arr;
+
+// socket global vars
 struct sockaddr_in si_other;
 int s, slen;
 struct sockaddr addr;
@@ -50,53 +124,6 @@ double _ceil(double num) {
 int min(int a, int b) {
     return (a < b) ? a : b;
 }
-
-/*
-Reliable data transfer plan TCP sender
-Data Structures
-SST = 100 (50,000 byte mark) or 64
-Duplicate ACK counter 
-DUplicate ACK counter threshold = 10 or 3
-Highest ACK packet sequence number (HACK)
-Congestion window of size 1 of TCP struct 
-File data array with 500 bytes per index 
-Timeout threshold = 5 RTTS (100 ms)
-ENUM for sender state: Slow start, Congestion avoidance, Fast recovery
-TCP struct:
-    Sequence number 
-    Data payload index into file data array
-    Timer 
-Algorithmns 
-UNIVERSAL
-Iterate through window, if timer not started, populate sequence number, data payload index, send packets
-and then start timer. 
-
-SLOW START 
-Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window by 
-current congestion window size + highest ACK seen - new ACK sequence number, reset HACK, mark 
-all packets with sequence number <= newest ACK as completed and shift congestion window. Reset duplicate
-ACK counter to zero. If congestion window size reaches SST then switch to congestion window state.
-Recieve duplicate ACK: Check if ACK sequence number is <= HACK and increment duplicate ACK counter,
-If duplicate ACK counter reaches threshold switch to Fast recovery state. Then, Set SST equal to CW/2.
-Next,set Congestion window size and expand or contract window equal to SST + duplicate ACK count. 
-
-CONGESTION AVOIDANCE 
-Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window by 
-current congestion window size + 1/floor(congestion window size) and repeat (highest ACK seen - new ACK 
-sequence number) times. Set highest ACK seen and mark all packets with sequence number <= newest ACK
-as completed and shift congestion window. Set duplicate ACK counter to zero.
-Recieve duplicate ACK: Same as process in slow start. 
-
-FAST RECOVERY
-Recieve new ACK: Check if ACK sequence number is higher than HACK, next expand congestion window to SST.
-Set highest ACK seen and mark all packets with sequence number <= newest ACK as completed and shift congestion window. Set duplicate ACK counter to zero.
-Recieve duplicate ACK: Check if ACK sequence number is <= HACK and increment duplicate ack counter. Next,
-Next expand congestion window by 1. 
-
-UNIVERSAL
-Timeout: Check if any packet in window has reached timer threshold, set SST to be half of CW, truncate CW to be 1,
-set duplicate ACK counter to zero and set mode to SLOW START. Clear timer of only packet remaining.  
-*/
 
 /*
 Packets have sequence number
@@ -251,7 +278,7 @@ void closeConnection() {
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* filename, unsigned long long int bytesToTransfer) {
     //Open the file
     FILE *fp;
-    char* buffer = NULL;
+    char* file_buf = NULL;
     fp = fopen(filename, "rb");
     if (fp == NULL) {
         printf("Could not open file to send.");
@@ -275,7 +302,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     createConnection();
     
     // read bytesToTransfer bytes from file to buffer
-    buffer = calloc(1, MAXDATASIZE);
+    file_buf = calloc(1, MAXDATASIZE);
     fseek(fp, 0L, SEEK_END);
     unsigned long long int sizeOfFile = ftell(fp);
     rewind(fp);
@@ -284,10 +311,10 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     }
 
     // read file into buffer
-    size_t bytesRead = fread(buffer, 1, bytesToTransfer, fp);
+    size_t bytesRead = fread(file_buf, 1, bytesToTransfer, fp);
     if (bytesRead != bytesToTransfer) {
         perror("Failed to read the specified number of bytes");
-        free(buffer);
+        free(file_buf);
         fclose(fp);
         exit(1);
     }
@@ -295,7 +322,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     // send data from buffer in chunks via sendto()
     size_t total_bytes_sent = 0;
     // total to send = buflen + (numchunks that we will send) * (control bits per chunk)
-    size_t total_bytes_to_send = strlen(buffer) + _ceil(( (double) strlen(buffer) ) / PAYLOADSIZE)*CONTROLBITLENGTH;
+    size_t total_bytes_to_send = strlen(file_buf) + _ceil(( (double) strlen(file_buf) ) / PAYLOADSIZE)*CONTROLBITLENGTH;
     //Keep track of number of data bits read
     size_t total_bytes_read_from_buffer = 0;
 
@@ -315,8 +342,8 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         sprintf(control_buf, "%d", sequenceNumber);
         memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
         // last chunk will not require full PAYLOADSIZE to send, so copy bytes as necessary.
-        size_t bytes_of_buff_to_send = min(PAYLOADSIZE, strlen(buffer) - total_bytes_read_from_buffer);
-        memcpy(&chunk_buf[CONTROLBITLENGTH], &buffer[total_bytes_read_from_buffer], bytes_of_buff_to_send);
+        size_t bytes_of_buff_to_send = min(PAYLOADSIZE, strlen(file_buf) - total_bytes_read_from_buffer);
+        memcpy(&chunk_buf[CONTROLBITLENGTH], &file_buf[total_bytes_read_from_buffer], bytes_of_buff_to_send);
 
         // send chunk, and make sure that full chunk is sent via while loop.
         size_t ctr = 0;
@@ -344,7 +371,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     closeConnection();
 
     printf("Closing the socket\n");
-    free(buffer);
+    free(file_buf);
     close(s);
     return;
 }
