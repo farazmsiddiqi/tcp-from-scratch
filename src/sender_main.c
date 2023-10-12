@@ -21,18 +21,28 @@
 #include <errno.h>
 #include <time.h>
 
-#define MAXDATASIZE 500000
+#define MAXDATASIZE 1000000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
 #define SLOWSTARTTHRESHOLD 100
 #define DUPACKTHRESHOLD 3
+//in mileseconds
+#define TIMERTIMEOUT 100
 
 // TCP struct
 typedef struct {
     size_t seq_num;
     char* payload_start;
-    clock_t timer_timestamp;
+    int timer_timestamp_msec;
+    bool sent_packet;
 } tcp_struct;
+
+//TCP state enum
+enum tcp_state {
+    slow_start = 0,
+    fast_recovery = 1,
+    congestion_avoidance = 2
+};
 
 // VECTOR IMPLEMENTATION
 typedef struct {
@@ -69,19 +79,12 @@ void push_back(vec* v, tcp_struct value) {
     v->data[v->size++] = value;
 }
 
-tcp_struct get(vec* v, size_t index) {
+tcp_struct* get(vec* v, size_t index) {
     if (index < v->size) {
-        return v->data[index];
+        return &v->data[index];
     }
-    printf("GET operation for index: %ld does not exist.", index);
 
-    tcp_struct no_val = {
-        .seq_num = 999,
-        .payload_start = "failure",
-        .timer_timestamp = 0
-    };
-
-    return no_val;
+    return NULL;
 }
 
 void erase(vec* v, size_t index) {
@@ -93,9 +96,16 @@ void erase(vec* v, size_t index) {
 // END VECTOR IMPLEMENTATION
 
 // TCP vars
-size_t hack;
+size_t SST = SLOWSTARTTHRESHOLD;
+size_t current_timeout = TIMERTIMEOUT;
+size_t timeout_threadshold = TIMERTIMEOUT; //adjust based on new algo tbd
+size_t hack = 0;
+size_t seqNum = 1;
+size_t dupAckCounter = 0;
 double CW = 1;
 vec packet_arr;
+clock_t timer;
+enum tcp_state currentState = slow_start;
 
 // socket global vars
 struct sockaddr_in si_other;
@@ -108,7 +118,6 @@ void diep(char *s) {
     exit(1);
 }
 
-
 double _ceil(double num) {
     int integerPart = (int)num;
     double decimalPart = num - integerPart;
@@ -120,6 +129,10 @@ double _ceil(double num) {
     }
 }
 
+int _floor(double num) {
+    int integerPart = (int)num;
+    return integerPart;
+}
 
 int min(int a, int b) {
     return (a < b) ? a : b;
@@ -274,6 +287,123 @@ void closeConnection() {
     }
 }
 
+void sendPackets(char *chunk_buf, char *control_buf, char *file_buf, size_t * total_bytes_read_from_buffer, size_t * total_bytes_sent) {
+
+    for(size_t i = 0; i < _floor(CW); i++) {
+        memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+        memset(control_buf, '\0', CONTROLBITLENGTH);
+        tcp_struct * current_packet = get(&packet_arr, i);
+        if(!current_packet->sent_packet) {
+            // populate chunk_buf with control bits and payload
+            sprintf(control_buf, "SEQ %ld", current_packet->seq_num);
+            memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
+            size_t bytes_of_buff_to_send = PAYLOADSIZE;
+            memcpy(&chunk_buf[CONTROLBITLENGTH], current_packet->payload_start, bytes_of_buff_to_send);
+
+            // send chunk, and make sure that full chunk is sent via while loop.
+            size_t chunk_bytes_sent = 0;
+            size_t bytes_to_send_for_chunk = PAYLOADSIZE + CONTROLBITLENGTH;
+            while(chunk_bytes_sent != bytes_to_send_for_chunk) {
+                if((chunk_bytes_sent += sendto(s, &chunk_buf[chunk_bytes_sent], bytes_to_send_for_chunk-chunk_bytes_sent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
+                        perror("chunk sending failure.\n");
+                        exit(1);
+                }
+            }
+            
+            //keep track of number of bytes sent and number of bytes read
+            *total_bytes_read_from_buffer += bytes_of_buff_to_send;
+            *total_bytes_sent += chunk_bytes_sent;
+            current_packet->sent_packet = true;
+            current_packet->timer_timestamp_msec = (clock()- timer) * 1000 /CLOCKS_PER_SEC;
+        }
+    }     
+}
+
+void checkTimer() {
+    //mark time that has passed so far
+    int elapsedTime = (clock() - timer) * 1000 / CLOCKS_PER_SEC;
+    //check if a timeout has occured
+    if(elapsedTime > current_timeout) {
+        //reset window
+        SST = (int)CW/2;
+        dupAckCounter = 0;
+        for(size_t i = 1; i < _floor(CW); i++) {
+            erase(&packet_arr, packet_arr.size-1);
+        }
+        CW = 1;
+        tcp_struct * firstPacket = get(&packet_arr,0);
+        firstPacket->timer_timestamp_msec = 0;
+        firstPacket->sent_packet = false;
+        currentState = slow_start;
+        current_timeout = timeout_threadshold;
+        timer = clock();
+    }
+}
+
+void slowStart(char *control_buf, char *file_buf, size_t ACKSequenceNumber) {
+    //handle ACK 
+    if(ACKSequenceNumber > hack) {
+        int slideDistance = 0;
+        int tCurrent = 0; 
+        int tNext = 0;
+        //remove acked packets
+        while(get(&packet_arr, slideDistance)->seq_num != ACKSequenceNumber) {
+            slideDistance++;
+        }
+        tCurrent = get(&packet_arr, slideDistance)->timer_timestamp_msec;
+        if(slideDistance+1 == _floor(CW)) {
+            free_vector(&packet_arr);
+        }
+        else {
+            while(slideDistance >= 0) {
+                erase(&packet_arr, 0);
+                slideDistance--;
+            }
+            tNext = get(&packet_arr, 0)->timer_timestamp_msec;
+        }
+
+        //slide and expand window for new packets
+        CW = CW + (ACKSequenceNumber - hack);
+        while(packet_arr.size != _floor(CW)) {
+            tcp_struct newEntry = {seqNum, file_buf + seqNum*PAYLOADSIZE, 0, false};
+            push_back(&packet_arr,newEntry);
+            seqNum++;
+        }
+        
+        //Adjust timeout based on single timer equation
+        current_timeout = (tCurrent + timeout_threadshold - ((clock() - timer) * 1000 / CLOCKS_PER_SEC)) + (tNext - tCurrent);
+        timer = clock();
+        dupAckCounter = 0;
+        hack = ACKSequenceNumber;
+    }
+    else if(ACKSequenceNumber == hack) {
+        dupAckCounter++;
+    }
+}
+
+void recievePacket(char *control_buf, char *file_buf) {
+    //get packet
+    int currentBytesRecieved = 0;
+    int totalBytesACKChunk = CONTROLBITLENGTH;
+    memset(control_buf, '\0', CONTROLBITLENGTH);
+    while(currentBytesRecieved != totalBytesACKChunk) {
+        if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+            // handle other errors
+            perror("chunk sending failure.\n");
+            exit(1);
+        }
+    }
+    size_t ACKSequenceNumber = 0;
+    int success = sscanf(control_buf, "ACK %ld", ACKSequenceNumber);
+    if(success != 1) {
+        return;
+    }
+
+    if(currentState == slow_start) {
+        slowStart(control_buf, file_buf, ACKSequenceNumber);
+    }
+}
+
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* filename, unsigned long long int bytesToTransfer) {
     //Open the file
@@ -331,40 +461,22 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     // CONTROLBITLENGTH is the num bits we have in each chunk to enforce TCP
     char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
     chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE] = '\0';
-    int sequenceNumber = 0;
+    //Start timer
+    timer = clock();
+    //Load first packet to be sent
+    tcp_struct firstPacket = {seqNum, file_buf, 0, false};
+    push_back(&packet_arr, firstPacket);
 
     // populate chunk buf from buffer
     while (total_bytes_sent < total_bytes_to_send) {
-        memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+        //check timeout
+        checkTimer();
 
-        // populate chunk_buf with control bits and payload
-        memset(control_buf, '\0', CONTROLBITLENGTH);
-        sprintf(control_buf, "%d", sequenceNumber);
-        memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
-        // last chunk will not require full PAYLOADSIZE to send, so copy bytes as necessary.
-        size_t bytes_of_buff_to_send = min(PAYLOADSIZE, strlen(file_buf) - total_bytes_read_from_buffer);
-        memcpy(&chunk_buf[CONTROLBITLENGTH], &file_buf[total_bytes_read_from_buffer], bytes_of_buff_to_send);
+        //send packets
+        sendPackets(chunk_buf, control_buf, file_buf, &total_bytes_read_from_buffer, &total_bytes_sent);
 
-        // send chunk, and make sure that full chunk is sent via while loop.
-        size_t ctr = 0;
-        size_t chunk_bytes_sent = 0;
-        size_t bytes_to_send_for_chunk = PAYLOADSIZE + CONTROLBITLENGTH;
-        while(chunk_bytes_sent != bytes_to_send_for_chunk) {
-            if((chunk_bytes_sent += sendto(s, &chunk_buf[chunk_bytes_sent], bytes_to_send_for_chunk-chunk_bytes_sent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-                    perror("chunk sending failure.\n");
-                    exit(1);
-            }
-            if (ctr > 1) {
-                printf("retrying send, not all bytes in chunk were sent...\n");
-            }
-
-            ++ctr;
-        }
-        
-        //keep track of number of bytes sent and number of bytes read
-        total_bytes_read_from_buffer += bytes_of_buff_to_send;
-        total_bytes_sent += chunk_bytes_sent;
-        sequenceNumber++;
+        //recieve packets
+        recievePacket(control_buf, file_buf);
     }
 
     //send final messages to close the connection

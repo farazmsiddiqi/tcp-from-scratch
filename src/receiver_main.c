@@ -21,7 +21,7 @@
 #include <sys/time.h>
 #include <errno.h>
 
-#define MAXDATASIZE 500000
+#define MAXDATASIZE 1000000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
 
@@ -30,17 +30,79 @@ int s, slen;
 struct sockaddr addr;
 socklen_t fromlen = sizeof(addr);
 
+// TCP struct
+typedef struct {
+    size_t seq_num;
+    char* payload_chunk;
+} tcp_struct;
+
+// VECTOR IMPLEMENTATION
+typedef struct {
+    tcp_struct* data;
+    size_t size;
+    size_t capacity;
+} vec;
+
+void init_vector(vec* v, size_t initial_capacity) {
+    v->data = (tcp_struct*)malloc(initial_capacity * sizeof(tcp_struct));
+    v->size = 0;
+    v->capacity = initial_capacity;
+}
+
+void free_vector(vec* v) {
+    free(v->data);
+    v->data = NULL;
+    v->size = 0;
+    v->capacity = 0;
+}
+
+void resize_vector(vec* v, size_t new_capacity) {
+    tcp_struct* new_data = (tcp_struct*)malloc(new_capacity * sizeof(tcp_struct));
+    memcpy(new_data, v->data, v->size * sizeof(tcp_struct));
+    free(v->data);
+    v->data = new_data;
+    v->capacity = new_capacity;
+}
+
+void push_back(vec* v, tcp_struct value) {
+    if (v->size == v->capacity) {
+        resize_vector(v, v->capacity * 2);
+    }
+    v->data[v->size++] = value;
+}
+
+tcp_struct* get(vec* v, size_t index) {
+    if (index < v->size) {
+        return &v->data[index];
+    }
+
+    return NULL;
+}
+
+void erase(vec* v, size_t index) {
+    if (index < v->size) {
+        memmove(&v->data[index], &v->data[index + 1], (v->size - index - 1) * sizeof(tcp_struct));
+        v->size--;
+    }
+}
+// END VECTOR IMPLEMENTATION
+
+//TCP data structures
+size_t highestInOrderPacketSequenceNumber = 0;
+vec OOO_packet_arr;
+
 void diep(char *s) {
     perror(s);
     exit(1);
 }
 
+//append results to file
 int write_to_file(char *buf, char *fname) {
     FILE *fp;
     int bytes_written;
     size_t buf_len = strlen(buf);
 
-    fp = fopen(fname, "wb");
+    fp = fopen(fname, "ab");
     if (fp == NULL) {
         perror("fopen");
         exit(1);
@@ -169,9 +231,62 @@ bool parseMessage(char *chunk_buf, char *data_buf, int num_chunks_recieved_total
         return true;
     }
     else {
+        size_t PacketSequenceNumber = 0;
+        int success = sscanf(chunk_buf, "SEQ %ld", PacketSequenceNumber);
+        if(success != 1) {
+            return;
+        }
+        //TODO: get rid of data buf and append to file
+        //Implement algorithmns of reciever logic
         memcpy(&data_buf[num_chunks_recieved_total*PAYLOADSIZE], &chunk_buf[CONTROLBITLENGTH], PAYLOADSIZE);
-        chunk_buf[CONTROLBITLENGTH] = '\0';
+        
         return false;
+    }
+}
+
+void recievePacket(char *chunk_buf, char * buffer, size_t * num_chunks_recieved_total, size_t *num_bytes_recieved_total, bool * closeConnection) {
+
+    //Number of bytes recieved in a single recv call
+    size_t num_bytes_response_chunk = 0; 
+    //Number of bytes recieved in all recv calls for a single chunk 
+    size_t num_bytes_recieved_chunk = 0;
+    //Number of bytes expected in each packet
+    size_t num_bytes_expected_chunk = CONTROLBITLENGTH + PAYLOADSIZE;  
+    //read bytes unto chunk safely 
+    memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
+    while(num_bytes_recieved_chunk != num_bytes_expected_chunk) {
+        if ((num_bytes_response_chunk = recvfrom(s, &chunk_buf[num_bytes_recieved_chunk], num_bytes_expected_chunk-num_bytes_recieved_chunk, 0, &addr, &fromlen)) == -1) {
+            perror("recvfrom returned -1");
+            free(buffer);
+            exit(1);
+        }
+        num_bytes_recieved_chunk += num_bytes_response_chunk;
+    }
+
+    //Extract data and control bits and write to file 
+    if(!parseMessage(chunk_buf, buffer, *num_chunks_recieved_total, closeConnection)) {
+        //distiguish between data and control 
+        *num_chunks_recieved_total += 1;
+        *num_bytes_recieved_total += num_bytes_expected_chunk;
+    }
+}
+
+void sendPacket(char * control_buf, bool * closeConnection) {
+    if(*closeConnection == true) {
+        return;
+    }
+    //send small ACK for highest sequence number recieved
+    int currentBytesSent = 0;
+    int totalBytesControlChunk = CONTROLBITLENGTH;
+    memset(control_buf, '\0', CONTROLBITLENGTH);
+    sprintf(control_buf, "ACK %ld", highestInOrderPacketSequenceNumber);
+    //send all bytes
+    while(currentBytesSent != totalBytesControlChunk) {
+    if ((currentBytesSent += sendto(s, &control_buf[currentBytesSent], totalBytesControlChunk-currentBytesSent, 0, &addr, fromlen)) == -1) {
+        perror("recvfrom returned -1");
+        free(control_buf);
+        exit(1);
+    }
     }
 }
 
@@ -195,44 +310,25 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
 
 	/* Now receive data and send acknowledgements */   
     char* buffer = calloc(1, MAXDATASIZE); 
-    //Number of bytes recieved in a single recv call
-    size_t num_bytes_response_chunk = 0; 
-    //Number of bytes expected in each packet
-    size_t num_bytes_expected_chunk = CONTROLBITLENGTH + PAYLOADSIZE;  
-    //Number of bytes recieved in all recv calls for a single check 
-    size_t num_bytes_recieved_chunk = 0;
     //Number of bytes recieved in the whole connection 
     size_t num_bytes_recieved_total = 0;
     //Number of chunks recieved in the whole connection
     size_t num_chunks_recieved_total = 0;
 
     char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
+    char control_buf[CONTROLBITLENGTH+1];
     bool closeConnection = false;
     //Continue untill connection close process is done
     while(!closeConnection) {
-        //read bytes unto chunk safely 
-        memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
-        while(num_bytes_recieved_chunk != num_bytes_expected_chunk) {
-            if ((num_bytes_response_chunk = recvfrom(s, &chunk_buf[num_bytes_recieved_chunk], num_bytes_expected_chunk-num_bytes_recieved_chunk, 0, &addr, &fromlen)) == -1) {
-                perror("recvfrom returned -1");
-                free(buffer);
-                exit(1);
-            }
-            num_bytes_recieved_chunk += num_bytes_response_chunk;
-        }
+        //recieve packet
+        recievePacket(chunk_buf, buffer, &num_chunks_recieved_total, &num_bytes_recieved_total, &closeConnection);
 
-        //Extract data and control bits and write to main data buffer
-        if(!parseMessage(chunk_buf, buffer, num_chunks_recieved_total,&closeConnection)) {
-            //distiguish between data and control 
-            num_chunks_recieved_total += 1;
-            num_bytes_recieved_total += num_bytes_expected_chunk;
-        }
-        //Reset for next iteration
-        num_bytes_response_chunk = 0;
-        num_bytes_recieved_chunk = 0;
+        //send packet
+        sendPacket(control_buf, &closeConnection);
+
     }
 
-    //Write to file
+    //Write to file (change do for every chunk)
     if(num_chunks_recieved_total*PAYLOADSIZE <= write_to_file(buffer, destinationFile)) {
         perror("file len != buffer len");
         free(buffer);
