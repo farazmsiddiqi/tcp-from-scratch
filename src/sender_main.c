@@ -158,7 +158,7 @@ void SYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
 
     while(currentBytesSent != totalBytesChunk) {
         if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-            perror("chunk sending failure.\n");
+            perror("chunk sending failure in phase 1.\n");
             exit(1);
         }
     }
@@ -179,7 +179,7 @@ bool ACKSYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage, bool final
                     break;
                 } else {
                     // handle other errors
-                    perror("chunk sending failure.\n");
+                    perror("chunk sending failure in phase 2.\n");
                     exit(1);
                 }
             }
@@ -217,7 +217,7 @@ void ACK(char *chunk_buf, int totalBytesChunk, bool SYNMessage) {
         sprintf(chunk_buf, "%s", "ACK");
         while(currentBytesSent != totalBytesChunk) {
             if((currentBytesSent += sendto(s, &chunk_buf[currentBytesSent], totalBytesChunk -currentBytesSent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
-                perror("chunk sending failure.\n");
+                perror("chunk sending failure in phase 3.\n");
                 exit(1);
             }
         }
@@ -290,10 +290,13 @@ void closeConnection() {
 
 void sendPackets(char *chunk_buf, char *control_buf, char *file_buf, size_t * total_bytes_read_from_buffer, size_t * total_bytes_sent) {
 
+    printf("sending packets\n");
+
     for(size_t i = 0; i < _floor(CW); i++) {
         memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
         memset(control_buf, '\0', CONTROLBITLENGTH);
         tcp_struct * current_packet = get(&packet_arr, i);
+        printf("sending packet %ld \n", current_packet->seq_num);
         if(!current_packet->sent_packet) {
             // populate chunk_buf with control bits and payload
             sprintf(control_buf, "SEQ %ld", current_packet->seq_num);
@@ -348,7 +351,7 @@ void slowStart(char *control_buf, char *file_buf, size_t ACKSequenceNumber) {
         int slideDistance = 0;
         int tCurrent = 0; 
         int tNext = 0;
-        //remove acked packets
+        //remove acked packet
         while(get(&packet_arr, slideDistance)->seq_num != ACKSequenceNumber) {
             slideDistance++;
         }
@@ -388,16 +391,42 @@ void recievePacket(char *control_buf, char *file_buf) {
     int currentBytesRecieved = 0;
     int totalBytesACKChunk = CONTROLBITLENGTH;
     memset(control_buf, '\0', CONTROLBITLENGTH);
+    printf("reciving packet \n");
+
+    // Set timeout
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    //timeout.tv_usec = timeout_threadshold - (timer) * 1000 / CLOCKS_PER_SEC; // and miliseconds
+    timeout.tv_usec = timeout_threadshold;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
+    }
+
     while(currentBytesRecieved != totalBytesACKChunk) {
         if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-            // handle other errors
-            perror("chunk sending failure.\n");
-            exit(1);
+                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                    // handle timeout
+                    printf("recvfrom() timed out\n");
+                    break;
+                } else {
+                    // handle other errors
+                    perror("chunk sending failure in phase 2.\n");
+                    exit(1);
+                }
         }
     }
+
+    // Reset timeout (set to 0 for a non-blocking call)
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        diep("setsockopt");
+    }
+    
     size_t ACKSequenceNumber = 0;
     int success = sscanf(control_buf, "ACK %ld", &ACKSequenceNumber);
     if(success != 1) {
+        printf("ACK not recieved\n");
         return;
     }
 
@@ -430,6 +459,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         fprintf(stderr, "inet_aton() failed\n");
         exit(1);
     }
+    printf("socket created\n");
 
     createConnection();
     

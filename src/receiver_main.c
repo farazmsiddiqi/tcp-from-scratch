@@ -77,7 +77,7 @@ tcp_struct* get(vec* v, size_t index) {
     if (index < v->size) {
         return &v->data[index];
     }
-
+    printf("wrong index\n");
     return NULL;
 }
 
@@ -185,8 +185,9 @@ void openConnection(char *chunk_buf) {
     }
 
     //TCP
+    printf("SYN\n");
     SYNFINACK(chunk_buf, totalBytesChunk, true);
-
+    printf("ACK\n");
     ACK(chunk_buf, totalBytesChunk, true);
 
     // Reset timeout (set to 0 for a non-blocking call)
@@ -223,6 +224,7 @@ void closeConnection(char *chunk_buf) {
 
 bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile) {
     if(strstr(chunk_buf, "SYN") != NULL) {
+        printf("control packet\n");
         openConnection(chunk_buf);
         //control packet was found
         return false;
@@ -238,9 +240,11 @@ bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile
         if(success != 1) {
             return true;
         }
+        printf("data packet %ld \n", PacketSequenceNumber);
 
         //Case 1 next packet recieved 
         if(PacketSequenceNumber == highestInOrderPacketSequenceNumber+1) {
+            printf("Case 1 next sequence number\n");
             // Step 1 Place in OOO buffer if needed
             if(OOO_packet_arr.size == 0) {
                 resize_vector(&OOO_packet_arr, 1);
@@ -271,8 +275,10 @@ bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile
             //Case 2 OOO packet recieved 
             //OOO buffer base highestInOrderPacketSequenceNumber+1 and tail PacketSequence
             //Step 1 expand OOO buffer if needed
+            printf("Case 2 OOO packet \n");
             if(OOO_packet_arr.size == 0) {
                 //Set locations for future packets
+                printf("Case 2 resize empty packet array\n");
                 resize_vector(&OOO_packet_arr, PacketSequenceNumber - highestInOrderPacketSequenceNumber);
                 int sequenceNumberPopulation = highestInOrderPacketSequenceNumber+1;
                 for(size_t i = 0; i < OOO_packet_arr.size; i++) {
@@ -284,6 +290,7 @@ bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile
             }
             else if(get(&OOO_packet_arr, OOO_packet_arr.size-1)->seq_num < PacketSequenceNumber) {
                 //Expand tail of buffer for future packets
+                printf("Case 2 expand packet array\n");
                 size_t i = get(&OOO_packet_arr, OOO_packet_arr.size-1)->seq_num;
                 for(; i <= PacketSequenceNumber; i++) {
                     tcp_struct nextEntry;
@@ -295,7 +302,8 @@ bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile
             }
 
             //Step 2 store OOO packet
-            tcp_struct *entry = get(&OOO_packet_arr,PacketSequenceNumber-highestInOrderPacketSequenceNumber+1);
+            printf("Store OOO packet in array size %ld, packet seq %ld and highest packet seen+1 %ld \n", OOO_packet_arr.size,PacketSequenceNumber, highestInOrderPacketSequenceNumber+1);
+            tcp_struct *entry = get(&OOO_packet_arr,PacketSequenceNumber-(highestInOrderPacketSequenceNumber+1));
             entry->packet_present = true;
             entry->payload_chunk = calloc(1, PAYLOADSIZE);
             memcpy(entry->payload_chunk, &chunk_buf[CONTROLBITLENGTH], PAYLOADSIZE);
@@ -317,6 +325,7 @@ bool recievePacket(char *chunk_buf, bool * closeConnection, char* destinationFil
     //read bytes unto chunk safely 
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
     while(num_bytes_recieved_chunk != num_bytes_expected_chunk) {
+        printf("reciving packet waiting on recvfrom\n");
         if ((num_bytes_response_chunk = recvfrom(s, &chunk_buf[num_bytes_recieved_chunk], num_bytes_expected_chunk-num_bytes_recieved_chunk, 0, &addr, &fromlen)) == -1) {
             perror("recvfrom returned -1");
             exit(1);
@@ -379,10 +388,12 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     //Continue untill connection close process is done
     while(!closeConnection) {
         //recieve packet
+        printf("recieve packet start \n");
         bool sendACK = recievePacket(chunk_buf, &closeConnection, destinationFile);
 
         //send ACK if needed packet
         if(sendACK) {
+            printf("send packet start \n");
             sendPacket(control_buf, &closeConnection);
         }
     }
