@@ -70,6 +70,7 @@ void resize_vector(vec* v, size_t new_capacity) {
     free(v->data);
     v->data = new_data;
     v->capacity = new_capacity;
+    v->size = new_capacity;
 }
 
 void push_back(vec* v, tcp_struct value) {
@@ -324,6 +325,7 @@ void checkTimer() {
     int elapsedTime = (clock() - timer) * 1000 / CLOCKS_PER_SEC;
     //check if a timeout has occured
     if(elapsedTime > current_timeout) {
+        printf("sender: timeout occured \n");
         //reset window
         SST = (int)CW/2;
         dupAckCounter = 0;
@@ -365,9 +367,9 @@ void slowStart(char *control_buf, char *file_buf, size_t ACKSequenceNumber) {
         //slide and expand window for new packets
         CW = CW + (ACKSequenceNumber - hack);
         while(packet_arr.size != _floor(CW)) {
+            seqNum++;
             tcp_struct newEntry = {seqNum, file_buf + seqNum*PAYLOADSIZE, 0, false};
             push_back(&packet_arr,newEntry);
-            seqNum++;
         }
         
         //Adjust timeout based on single timer equation
@@ -394,7 +396,7 @@ void recievePacket(char *control_buf, char *file_buf) {
         }
     }
     size_t ACKSequenceNumber = 0;
-    int success = sscanf(control_buf, "ACK %ld", ACKSequenceNumber);
+    int success = sscanf(control_buf, "ACK %ld", &ACKSequenceNumber);
     if(success != 1) {
         return;
     }
