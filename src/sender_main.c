@@ -28,7 +28,7 @@
 #define CONTROLBITLENGTH 12
 #define SLOWSTARTTHRESHOLD 100
 #define DUPACKTHRESHOLD 3
-//in mileseconds
+//in milliseconds
 #define TIMERTIMEOUT 100
 
 // TCP struct
@@ -50,12 +50,12 @@ enum tcp_state {
 // TCP vars
 size_t SST = SLOWSTARTTHRESHOLD;
 size_t current_timeout = TIMERTIMEOUT;
-size_t timeout_threadshold = TIMERTIMEOUT; //adjust based on new algo tbd
+size_t timeout_threshold = TIMERTIMEOUT; //adjust based on new algo tbd
 size_t hack = 0;
 size_t seqNum = 1;
 size_t numPacketsCompleted = 0;
-size_t total_packets_to_send = 0;
 size_t dupAckCounter = 0;
+size_t total_packets_to_send = 0;
 double CW = 1;
 std::vector<tcp_struct> packet_arr;
 clock_t timer;
@@ -248,12 +248,13 @@ void closeConnection() {
 
 void sendPackets(char *chunk_buf, char *control_buf) {
 
-    printf("sending packets\n");
+    // printf("sending packets\n");
 
+    // send the current window of packets (window size = CW)
     for(size_t i = 0; i < _floor(CW) && i < packet_arr.size(); i++) {
         memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
         memset(control_buf, '\0', CONTROLBITLENGTH);
-        tcp_struct & current_packet = packet_arr[i];
+        tcp_struct& current_packet = packet_arr[i];
         if(!current_packet.sent_packet) {
             printf("sending packet %ld \n", current_packet.seq_num);
             // populate chunk_buf with control bits and payload
@@ -273,81 +274,101 @@ void sendPackets(char *chunk_buf, char *control_buf) {
             }
             
             current_packet.sent_packet = true;
-            current_packet.timer_timestamp_msec = (clock()- timer) * 1000 /CLOCKS_PER_SEC;
+            // update current packet timer with the time of send
+            current_packet.timer_timestamp_msec = (clock()- timer) * 1000 / CLOCKS_PER_SEC;
         }
-    }     
+    }
 }
 
 void checkTimer() {
     //mark time that has passed so far
     int elapsedTime = (clock() - timer) * 1000 / CLOCKS_PER_SEC;
-    printf("timer function elapsed time %d\n", elapsedTime);
+    // printf("timer function elapsed time %d\n", elapsedTime);
     //check if a timeout has occured
     if(elapsedTime >= current_timeout) {
-        printf("sender: timeout occured \n");
+        printf("sender: timeout occurred \n");
         //reset window
         SST = (int)CW/2;
         dupAckCounter = 0;
+        
+        // instead of resizing, set all packets in window to false (triggers eventual resend)
         for(size_t i = 0; i < packet_arr.size(); i++) {
             packet_arr[i].sent_packet = false;
         }
+
         CW = 1;
-        tcp_struct & firstPacket = packet_arr[0];
+        tcp_struct& firstPacket = packet_arr[0];
         firstPacket.timer_timestamp_msec = 0;
         firstPacket.sent_packet = false;
         currentState = slow_start;
-        current_timeout = timeout_threadshold;
+        current_timeout = timeout_threshold;
         timer = clock();
-        printf("sender: timeout occured new sequence number %ld\n", packet_arr[0].seq_num);
+        printf("sender: timeout occurred new sequence number %ld\n", packet_arr[0].seq_num);
     }
 }
 
 void slowStart(char *file_buf, size_t ACKSequenceNumber) {
-    //handle ACK 
+    
+    /*
+    if recieved ACK is higher than current HACK,
+    slide window and inc window size by 1
+    */
     if(ACKSequenceNumber > hack) {
         int slideDistance = 0;
-        int tCurrent = 0; 
+        int tCurrent = 0;
         int tNext = 0;
-        printf("slow start remove acked packet stage\n");
-        printf("ACK recieved %ld\n", ACKSequenceNumber);
+        printf("(slow start) recieved ACK is higher than HACK. sliding the congestion window, incrementing CW size.\n");
+
         //remove acked packet
         while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
             slideDistance++;
         }
+
         if(!packet_arr.empty()) {
-            //come back
             tCurrent = packet_arr[0].timer_timestamp_msec;
             tNext = packet_arr[0].timer_timestamp_msec;
         }
+
         numPacketsCompleted += slideDistance+1;
-        printf("slow start trying to remove packet with slide %d\n", slideDistance);
+        int tmp = slideDistance;
         while(!packet_arr.empty() && slideDistance >= 0) {
             printf("removing packet %ld\n", packet_arr[0].seq_num);
             packet_arr.erase(packet_arr.begin());
             slideDistance--;
         }
+        printf("removed (%d) packets from packet_arr\n", tmp);
 
         //slide and expand window for new packets
-        printf("slow start add new packets stage\n");
+        printf("slow start add new packets\n");
+        // increase CW based on new highest ACK. 
         CW = CW + (ACKSequenceNumber - hack);
         //printf("new CW is %f \n", CW);
+        printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
         while(packet_arr.size() != _floor(CW) && seqNum < total_packets_to_send+1 && numPacketsCompleted < total_packets_to_send) {
             char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
             seqNum++;
             tcp_struct newEntry = {seqNum, nextAddress, 0, false};
             packet_arr.push_back(newEntry);
-            printf("Adding packet %ld\n", seqNum);
+            printf("Added packet %ld\n", seqNum);
         }
+
+        printf("slid window by (%d), completed (%ld) packets total. current packet_arr size: (%ld).\n", tmp, numPacketsCompleted, packet_arr.size());
         
         //Adjust timeout based on single timer equation
-        printf("slow start fix variables stage \n");
-        current_timeout = (tCurrent + timeout_threadshold - ((clock() - timer) * 1000 / CLOCKS_PER_SEC)) + (tNext - tCurrent);
+        printf("(slow start) update timer \n");
+        int alarm_time = tCurrent + timeout_threshold;
+        clock_t current_ACK_time = ((clock() - timer) * 1000 / CLOCKS_PER_SEC);
+        current_timeout = (alarm_time - current_ACK_time) + (tNext - tCurrent);
         timer = clock();
+
+        // reset dupAck because new hack was recieved
         dupAckCounter = 0;
         hack = ACKSequenceNumber;
     }
+
     else if(ACKSequenceNumber == hack) {
         dupAckCounter++;
+        printf("new ACK has same value as hack, incrementing dupACK counter to (%ld)", dupAckCounter);
     }
 }
 
@@ -356,7 +377,6 @@ void recievePacket(char *control_buf, char *file_buf) {
     int currentBytesRecieved = 0;
     int totalBytesACKChunk = CONTROLBITLENGTH;
     memset(control_buf, '\0', CONTROLBITLENGTH);
-    printf("reciving packet \n");
 
     // Set timeout
     struct timeval timeout;
@@ -368,7 +388,9 @@ void recievePacket(char *control_buf, char *file_buf) {
     int select_ret = select(s + 1, &read_fds, NULL, NULL, &timeout);
 
     if(select_ret > 0) {
+        printf("socket recieved ACK\n");
         while(currentBytesRecieved != totalBytesACKChunk) {
+            printf("recieving ACK from socket to control_buf\n");
             if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
                     if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
                         // handle timeout
@@ -386,11 +408,11 @@ void recievePacket(char *control_buf, char *file_buf) {
     size_t ACKSequenceNumber = 0;
     int success = sscanf(control_buf, "ACK %ld", &ACKSequenceNumber);
     if(success != 1) {
-        printf("ACK not recieved\n");
+        // printf("ACK not recieved\n");
+        // printf("control buf looks like this: <BOS>%s<EOS>\n", control_buf);
         return;
-    }
-    else {
-        printf("ACK recieved for packet %ld\n", ACKSequenceNumber);
+    } else {
+        printf("ACK recieved for packet (%ld)! control buf looks like this: <BOS>%s<EOS>\n", ACKSequenceNumber, control_buf);
     }
 
     if(currentState == slow_start) {
@@ -457,7 +479,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE] = '\0';
     //Start timer
     timer = clock();
-    //Load first packet to be sent
+    //Load first packet to be sent (TODO: would this change the file_buf pointer?)
     tcp_struct firstPacket = {seqNum, file_buf, 0, false};
     packet_arr.push_back(firstPacket);
 
@@ -502,4 +524,3 @@ int main(int argc, char** argv) {
 
     return (EXIT_SUCCESS);
 }
-
