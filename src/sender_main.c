@@ -20,6 +20,8 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <time.h>
+#include <vector>
+#include <string>
 
 #define MAXDATASIZE 1000000
 #define PAYLOADSIZE 500
@@ -30,12 +32,12 @@
 #define TIMERTIMEOUT 100
 
 // TCP struct
-typedef struct {
+struct tcp_struct {
     size_t seq_num;
     char* payload_start;
     int timer_timestamp_msec;
     bool sent_packet;
-} tcp_struct;
+};
 
 //TCP state enum
 enum tcp_state {
@@ -44,57 +46,6 @@ enum tcp_state {
     congestion_avoidance = 2
 };
 
-// VECTOR IMPLEMENTATION
-typedef struct {
-    tcp_struct* data;
-    size_t size;
-    size_t capacity;
-} vec;
-
-void init_vector(vec* v, size_t initial_capacity) {
-    v->data = (tcp_struct*)malloc(initial_capacity * sizeof(tcp_struct));
-    v->size = 0;
-    v->capacity = initial_capacity;
-}
-
-void free_vector(vec* v) {
-    free(v->data);
-    v->data = NULL;
-    v->size = 0;
-    v->capacity = 0;
-}
-
-void resize_vector(vec* v, size_t new_capacity) {
-    tcp_struct* new_data = (tcp_struct*)malloc(new_capacity * sizeof(tcp_struct));
-    memcpy(new_data, v->data, v->size * sizeof(tcp_struct));
-    free(v->data);
-    v->data = new_data;
-    v->capacity = new_capacity;
-    v->size = new_capacity;
-}
-
-void push_back(vec* v, tcp_struct value) {
-    if (v->size == v->capacity) {
-        resize_vector(v, v->capacity * 2);
-    }
-    v->data[v->size++] = value;
-}
-
-tcp_struct* get(vec* v, size_t index) {
-    if (index < v->size) {
-        return &v->data[index];
-    }
-
-    return NULL;
-}
-
-void erase(vec* v, size_t index) {
-    if (index < v->size) {
-        memmove(&v->data[index], &v->data[index + 1], (v->size - index - 1) * sizeof(tcp_struct));
-        v->size--;
-    }
-}
-// END VECTOR IMPLEMENTATION
 
 // TCP vars
 size_t SST = SLOWSTARTTHRESHOLD;
@@ -102,9 +53,10 @@ size_t current_timeout = TIMERTIMEOUT;
 size_t timeout_threadshold = TIMERTIMEOUT; //adjust based on new algo tbd
 size_t hack = 0;
 size_t seqNum = 1;
+size_t numPacketsCompleted = 0;
 size_t dupAckCounter = 0;
 double CW = 1;
-vec packet_arr;
+std::vector<tcp_struct> packet_arr;
 clock_t timer;
 enum tcp_state currentState = slow_start;
 
@@ -113,9 +65,10 @@ struct sockaddr_in si_other;
 int s, slen;
 struct sockaddr addr;
 socklen_t fromlen = sizeof(addr);
+std::string socketError1;
 
-void diep(char *s) {
-    perror(s);
+void diep(std::string &socketError1) {
+    perror(socketError1.c_str());
     exit(1);
 }
 
@@ -233,7 +186,8 @@ void createConnection() {
     timeout.tv_sec = 0;  // timeout in seconds
     timeout.tv_usec = 40000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
+        socketError1 = "setsockopt";
+        diep(socketError1);
     }
 
     //SYN
@@ -249,7 +203,8 @@ void createConnection() {
     timeout.tv_sec = 0;
     timeout.tv_usec = 0;
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
+        socketError1 = "setsockopt";
+        diep(socketError1);
     }
 }
 
@@ -268,7 +223,8 @@ void closeConnection() {
     timeout.tv_sec = 0;  // timeout in seconds
     timeout.tv_usec = 40000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
+        socketError1 = "setsockopt";
+        diep(socketError1);
     }
 
     //FIN
@@ -284,25 +240,26 @@ void closeConnection() {
     timeout.tv_sec = 0;
     timeout.tv_usec = 0;
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
+        socketError1 = "setsockopt";
+        diep(socketError1);
     }
 }
 
-void sendPackets(char *chunk_buf, char *control_buf, char *file_buf, size_t * total_bytes_read_from_buffer, size_t * total_bytes_sent) {
+void sendPackets(char *chunk_buf, char *control_buf) {
 
     printf("sending packets\n");
 
     for(size_t i = 0; i < _floor(CW); i++) {
         memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
         memset(control_buf, '\0', CONTROLBITLENGTH);
-        tcp_struct * current_packet = get(&packet_arr, i);
-        printf("sending packet %ld \n", current_packet->seq_num);
-        if(!current_packet->sent_packet) {
+        tcp_struct & current_packet = packet_arr[i];
+        printf("sending packet %ld \n", current_packet.seq_num);
+        if(!current_packet.sent_packet) {
             // populate chunk_buf with control bits and payload
-            sprintf(control_buf, "SEQ %ld", current_packet->seq_num);
+            sprintf(control_buf, "SEQ %ld", current_packet.seq_num);
             memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
             size_t bytes_of_buff_to_send = PAYLOADSIZE;
-            memcpy(&chunk_buf[CONTROLBITLENGTH], current_packet->payload_start, bytes_of_buff_to_send);
+            memcpy(&chunk_buf[CONTROLBITLENGTH], current_packet.payload_start, bytes_of_buff_to_send);
 
             // send chunk, and make sure that full chunk is sent via while loop.
             size_t chunk_bytes_sent = 0;
@@ -314,11 +271,8 @@ void sendPackets(char *chunk_buf, char *control_buf, char *file_buf, size_t * to
                 }
             }
             
-            //keep track of number of bytes sent and number of bytes read
-            *total_bytes_read_from_buffer += bytes_of_buff_to_send;
-            *total_bytes_sent += chunk_bytes_sent;
-            current_packet->sent_packet = true;
-            current_packet->timer_timestamp_msec = (clock()- timer) * 1000 /CLOCKS_PER_SEC;
+            current_packet.sent_packet = true;
+            current_packet.timer_timestamp_msec = (clock()- timer) * 1000 /CLOCKS_PER_SEC;
         }
     }     
 }
@@ -326,56 +280,65 @@ void sendPackets(char *chunk_buf, char *control_buf, char *file_buf, size_t * to
 void checkTimer() {
     //mark time that has passed so far
     int elapsedTime = (clock() - timer) * 1000 / CLOCKS_PER_SEC;
+    printf("timer function elapsed time %d\n", elapsedTime);
     //check if a timeout has occured
     if(elapsedTime > current_timeout) {
         printf("sender: timeout occured \n");
         //reset window
         SST = (int)CW/2;
         dupAckCounter = 0;
-        for(size_t i = 1; i < _floor(CW); i++) {
-            erase(&packet_arr, packet_arr.size-1);
-        }
+        packet_arr.resize(1);
         CW = 1;
-        tcp_struct * firstPacket = get(&packet_arr,0);
-        firstPacket->timer_timestamp_msec = 0;
-        firstPacket->sent_packet = false;
+        tcp_struct & firstPacket = packet_arr[0];
+        firstPacket.timer_timestamp_msec = 0;
+        firstPacket.sent_packet = false;
         currentState = slow_start;
         current_timeout = timeout_threadshold;
         timer = clock();
+        seqNum = packet_arr[0].seq_num;
+        printf("sender: timeout occured new sequence number %ld\n", packet_arr[0].seq_num);
     }
 }
 
-void slowStart(char *control_buf, char *file_buf, size_t ACKSequenceNumber) {
+void slowStart(char *file_buf, size_t ACKSequenceNumber) {
     //handle ACK 
     if(ACKSequenceNumber > hack) {
         int slideDistance = 0;
         int tCurrent = 0; 
         int tNext = 0;
+        printf("slow start remove acked packet\n");
         //remove acked packet
-        while(get(&packet_arr, slideDistance)->seq_num != ACKSequenceNumber) {
+        while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
             slideDistance++;
+            numPacketsCompleted++;
         }
-        tCurrent = get(&packet_arr, slideDistance)->timer_timestamp_msec;
+        if(!packet_arr.empty()) {
+            tCurrent = packet_arr[slideDistance].timer_timestamp_msec;
+        }
         if(slideDistance+1 == _floor(CW)) {
-            free_vector(&packet_arr);
+            packet_arr.clear();
         }
         else {
             while(slideDistance >= 0) {
-                erase(&packet_arr, 0);
+                packet_arr.erase(packet_arr.begin());
                 slideDistance--;
             }
-            tNext = get(&packet_arr, 0)->timer_timestamp_msec;
+            tNext = packet_arr[0].timer_timestamp_msec;
         }
 
         //slide and expand window for new packets
+        printf("slow start add new packets\n");
         CW = CW + (ACKSequenceNumber - hack);
-        while(packet_arr.size != _floor(CW)) {
+        //printf("new CW is %f \n", CW);
+        while(packet_arr.size() != _floor(CW)) {
+            char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
             seqNum++;
-            tcp_struct newEntry = {seqNum, file_buf + seqNum*PAYLOADSIZE, 0, false};
-            push_back(&packet_arr,newEntry);
+            tcp_struct newEntry = {seqNum, nextAddress, 0, false};
+            packet_arr.push_back(newEntry);
         }
         
         //Adjust timeout based on single timer equation
+        printf("slow start fix variables \n");
         current_timeout = (tCurrent + timeout_threadshold - ((clock() - timer) * 1000 / CLOCKS_PER_SEC)) + (tNext - tCurrent);
         timer = clock();
         dupAckCounter = 0;
@@ -396,31 +359,26 @@ void recievePacket(char *control_buf, char *file_buf) {
     // Set timeout
     struct timeval timeout;
     timeout.tv_sec = 0;  // timeout in seconds
-    //timeout.tv_usec = timeout_threadshold - (timer) * 1000 / CLOCKS_PER_SEC; // and miliseconds
-    timeout.tv_usec = timeout_threadshold;
-    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
-    }
+    timeout.tv_usec = TIMERTIMEOUT;
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(s, &read_fds);
+    int select_ret = select(s + 1, &read_fds, NULL, NULL, &timeout);
 
-    while(currentBytesRecieved != totalBytesACKChunk) {
-        if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-                    // handle timeout
-                    printf("recvfrom() timed out\n");
-                    break;
-                } else {
-                    // handle other errors
-                    perror("chunk sending failure in phase 2.\n");
-                    exit(1);
-                }
+    if(select_ret > 0) {
+        while(currentBytesRecieved != totalBytesACKChunk) {
+            if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+                    if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                        // handle timeout
+                        printf("recvfrom() timed out\n");
+                        break;
+                    } else {
+                        // handle other errors
+                        perror("chunk sending failure in phase 2.\n");
+                        exit(1);
+                    }
+            }
         }
-    }
-
-    // Reset timeout (set to 0 for a non-blocking call)
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 0;
-    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
-        diep("setsockopt");
     }
     
     size_t ACKSequenceNumber = 0;
@@ -431,7 +389,7 @@ void recievePacket(char *control_buf, char *file_buf) {
     }
 
     if(currentState == slow_start) {
-        slowStart(control_buf, file_buf, ACKSequenceNumber);
+        slowStart(file_buf, ACKSequenceNumber);
     }
 }
 
@@ -449,8 +407,10 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 	/* Determine how many bytes to transfer */
     slen = sizeof (si_other);
 
-    if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
-        diep("socket");
+    if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+        socketError1 = "socket";
+        diep(socketError1);
+    }
 
     memset((char *) &si_other, 0, sizeof (si_other));
     si_other.sin_family = AF_INET;
@@ -464,7 +424,8 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     createConnection();
     
     // read bytesToTransfer bytes from file to buffer
-    file_buf = calloc(1, MAXDATASIZE);
+    file_buf = new char[MAXDATASIZE];
+    printf("file buffer address %p\n", file_buf);
     fseek(fp, 0L, SEEK_END);
     unsigned long long int sizeOfFile = ftell(fp);
     rewind(fp);
@@ -476,17 +437,13 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     size_t bytesRead = fread(file_buf, 1, bytesToTransfer, fp);
     if (bytesRead != bytesToTransfer) {
         perror("Failed to read the specified number of bytes");
-        free(file_buf);
+        delete [] file_buf;
         fclose(fp);
         exit(1);
     }
 
-    // send data from buffer in chunks via sendto()
-    size_t total_bytes_sent = 0;
-    // total to send = buflen + (numchunks that we will send) * (control bits per chunk)
-    size_t total_bytes_to_send = strlen(file_buf) + _ceil(( (double) strlen(file_buf) ) / PAYLOADSIZE)*CONTROLBITLENGTH;
-    //Keep track of number of data bits read
-    size_t total_bytes_read_from_buffer = 0;
+    //keep track of total number of packets sent and recieved ack
+    size_t total_packets_to_send = _ceil(( (double) strlen(file_buf) ) / PAYLOADSIZE);
 
     //Seperate buffer for control bits like sequence number, startup, and close
     char control_buf[CONTROLBITLENGTH];
@@ -497,15 +454,15 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     timer = clock();
     //Load first packet to be sent
     tcp_struct firstPacket = {seqNum, file_buf, 0, false};
-    push_back(&packet_arr, firstPacket);
+    packet_arr.push_back(firstPacket);
 
     // populate chunk buf from buffer
-    while (total_bytes_sent < total_bytes_to_send) {
+    while (numPacketsCompleted < total_packets_to_send) {
         //check timeout
         checkTimer();
 
         //send packets
-        sendPackets(chunk_buf, control_buf, file_buf, &total_bytes_read_from_buffer, &total_bytes_sent);
+        sendPackets(chunk_buf, control_buf);
 
         //recieve packets
         recievePacket(control_buf, file_buf);
@@ -515,7 +472,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
     closeConnection();
 
     printf("Closing the socket\n");
-    free(file_buf);
+    delete[] file_buf;
     close(s);
     return;
 }
