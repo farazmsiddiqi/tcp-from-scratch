@@ -23,7 +23,7 @@
 #include <vector>
 #include <string>
 
-#define MAXDATASIZE 10000000
+#define MAXDATASIZE 30000000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
 #define SLOWSTARTTHRESHOLD 100
