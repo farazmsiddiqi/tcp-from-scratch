@@ -1,6 +1,6 @@
 /* 
  * File:   receiver_main.c
- * Author: farazms2, nvk4
+ * Author: 
  *
  * Created on
  */
