@@ -1,6 +1,6 @@
 /* 
  * File:   receiver_main.c
- * Author: 
+ * Author: farazms2, nvk4
  *
  * Created on
  */
@@ -23,6 +23,7 @@
 #include <vector>
 #include <string>
 
+#define MAXDATASIZE 1000000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
 
@@ -135,7 +136,7 @@ void openConnection(char *chunk_buf) {
     // Set timeout
     struct timeval timeout;
     timeout.tv_sec = 0;  // timeout in seconds
-    timeout.tv_usec = 10000; // and microseconds
+    timeout.tv_usec = 50000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
         socketError1 = "setsockopt";
         diep(socketError1);
@@ -146,6 +147,8 @@ void openConnection(char *chunk_buf) {
     SYNFINACK(chunk_buf, totalBytesChunk, true);
     // printf("ACK\n");
     ACK(chunk_buf, totalBytesChunk, true);
+
+    memset(chunk_buf, '\0', CONTROLBITLENGTH+PAYLOADSIZE);
 
     // Reset timeout (set to 0 for a non-blocking call)
     timeout.tv_sec = 0;
@@ -162,7 +165,7 @@ void closeConnection(char *chunk_buf) {
      // Set timeout
     struct timeval timeout;
     timeout.tv_sec = 0;  // timeout in seconds
-    timeout.tv_usec = 10000; // and microseconds
+    timeout.tv_usec = 50000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
         socketError1 = "setsockopt";
         diep(socketError1);
@@ -204,7 +207,7 @@ bool parseMessage(char *chunk_buf, bool * connectionClose, char* destinationFile
         if(success != 1) {
             return true;
         }
-        // printf("data packet %ld \n", PacketSequenceNumber);
+        //printf("data packet %ld \n", PacketSequenceNumber);
 
         //Case 1 next packet recieved 
         if(PacketSequenceNumber == highestInOrderPacketSequenceNumber+1) {
@@ -296,7 +299,7 @@ bool recievePacket(char *chunk_buf, bool * closeConnection, char* destinationFil
     //read bytes unto chunk safely 
     memset(chunk_buf, '\0', CONTROLBITLENGTH + PAYLOADSIZE);
     while(num_bytes_recieved_chunk != num_bytes_expected_chunk) {
-        // // printf("reciving packet waiting on recvfrom\n");
+        //printf("reciving packet waiting on recvfrom\n");
         if ((num_bytes_response_chunk = recvfrom(s, &chunk_buf[num_bytes_recieved_chunk], num_bytes_expected_chunk-num_bytes_recieved_chunk, 0, &addr, &fromlen)) == -1) {
             perror("recvfrom returned -1");
             exit(1);
@@ -350,7 +353,7 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     si_me.sin_family = AF_INET;
     si_me.sin_port = htons(myUDPport);
     si_me.sin_addr.s_addr = htonl(INADDR_ANY);
-    // printf("Now binding\n");
+    printf("Now binding\n");
     if (bind(s, (struct sockaddr*) &si_me, sizeof (si_me)) == -1) {
         socketError1 = "bind";
         diep(socketError1);
@@ -365,7 +368,6 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     //Continue untill connection close process is done
     while(!closeConnection) {
         //recieve packet
-        // printf("recieve packet start \n");
         bool sendACK = recievePacket(chunk_buf, &closeConnection, destinationFile);
 
         //send ACK if needed packet
@@ -376,7 +378,7 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile) {
     }
 
     close(s);
-	// printf("%s received.", destinationFile);
+	printf("%s received.", destinationFile);
     return;
 }
 

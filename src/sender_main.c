@@ -21,9 +21,11 @@
 #include <errno.h>
 #include <time.h>
 #include <vector>
+#include <iostream>
+#include <fstream>
 #include <string>
 
-#define MAXDATASIZE 30000000
+#define MAXDATASIZE 50000000
 #define PAYLOADSIZE 500
 #define CONTROLBITLENGTH 12
 #define SLOWSTARTTHRESHOLD 100
@@ -44,7 +46,7 @@
 // TCP struct
 struct tcp_struct {
     size_t seq_num;
-    char* payload_start;
+    char* payload_content;
     int timer_timestamp_msec;
     bool sent_packet;
 };
@@ -105,6 +107,22 @@ int _floor(double num) {
 int min(int a, int b) {
     return (a < b) ? a : b;
 }
+
+int max(int a, int b) {
+    return (a > b) ? a : b;
+}
+
+void getNextFileChunk(FILE *fp, char * buffer) {
+    memset(buffer, 0, PAYLOADSIZE);
+    fread(buffer, 1, PAYLOADSIZE, fp);
+    if (ferror(fp)) {
+        delete [] buffer;
+        perror("Error reading from file");
+        fclose(fp);
+        exit(1);
+    }
+}
+
 /*
 Packets have sequence number
 Send SYN packet
@@ -140,7 +158,7 @@ bool ACKSYNFIN(char *chunk_buf, int totalBytesChunk, bool SYNMessage, bool final
             if((currentBytesRecieved += recvfrom(s, &chunk_buf[currentBytesRecieved], totalBytesChunk -currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
                 if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
                     // handle timeout
-                    ////printf("recvfrom() timed out\n");
+                    printf("recvfrom() timed out\n");
                     ACKReceived = false;
                     break;
                 } else {
@@ -197,7 +215,7 @@ void createConnection() {
     // Set timeout
     struct timeval timeout;
     timeout.tv_sec = 0;  // timeout in seconds
-    timeout.tv_usec = 10000; // and microseconds
+    timeout.tv_usec = 50000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
         socketError1 = "setsockopt";
         diep(socketError1);
@@ -234,7 +252,7 @@ void closeConnection() {
 
     struct timeval timeout;
     timeout.tv_sec = 0;  // timeout in seconds
-    timeout.tv_usec = 10000; // and microseconds
+    timeout.tv_usec = 50000; // and microseconds
     if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
         socketError1 = "setsockopt";
         diep(socketError1);
@@ -260,7 +278,7 @@ void closeConnection() {
 
 void sendPackets(char *chunk_buf, char *control_buf) {
 
-    // ////printf("sending packets\n");
+    printf("sending packets\n");
 
     // send the current window of packets (window size = CW)
     for(size_t i = 0; i < _floor(CW) && i < packet_arr.size(); i++) {
@@ -268,18 +286,18 @@ void sendPackets(char *chunk_buf, char *control_buf) {
         memset(control_buf, '\0', CONTROLBITLENGTH);
         tcp_struct& current_packet = packet_arr[i];
         if(!current_packet.sent_packet) {
-            ////printf("sending packet %ld \n", current_packet.seq_num);
+            printf("sending packet %ld \n", current_packet.seq_num);
             // populate chunk_buf with control bits and payload
             sprintf(control_buf, "SEQ %ld", current_packet.seq_num);
             memcpy(chunk_buf, control_buf, CONTROLBITLENGTH);
             size_t bytes_of_buff_to_send = PAYLOADSIZE;
-            memcpy(&chunk_buf[CONTROLBITLENGTH], current_packet.payload_start, bytes_of_buff_to_send);
+            memcpy(&chunk_buf[CONTROLBITLENGTH], current_packet.payload_content, bytes_of_buff_to_send);
 
             // send chunk, and make sure that full chunk is sent via while loop.
             size_t chunk_bytes_sent = 0;
             size_t bytes_to_send_for_chunk = PAYLOADSIZE + CONTROLBITLENGTH;
             while(chunk_bytes_sent != bytes_to_send_for_chunk) {
-                // printf("sending\n");
+                printf("sending\n");
                 if((chunk_bytes_sent += sendto(s, &chunk_buf[chunk_bytes_sent], bytes_to_send_for_chunk-chunk_bytes_sent, 0, (struct sockaddr *) &si_other, slen)) == -1) {
                         perror("chunk sending failure.\n");
                         exit(1);
@@ -291,25 +309,41 @@ void sendPackets(char *chunk_buf, char *control_buf) {
             current_packet.timer_timestamp_msec = USEC_TO_MSEC(clock());
         }
     }
+    printf("sent all avaiable packets\n");
 }
 
 
 void adjust_timer(timer_t timer_id, time_t new_timeout_val) {
 
+    pthread_mutex_lock(&timer_lock);
     struct itimerspec new_time;
+    new_time.it_interval.tv_sec = 0;
+    new_time.it_interval.tv_nsec = 0;
+    new_time.it_value.tv_sec = 0;
     new_time.it_value.tv_nsec = MSEC_TO_NSEC(new_timeout_val);
+    printf("new time will be %d \n", (int)new_timeout_val);
 
-    if(timer_settime(timer_id, 0, &new_time, NULL) == -1) {
+    if(timer_settime(tcp_timeout_timer, 0, &new_time, NULL) == -1) {
         perror("timer_settime in adjust_timer");
         exit(EXIT_FAILURE);
     }
+    pthread_mutex_unlock(&timer_lock);
 }
 
 
 void checkTimer() {
     //check if a timeout has occured
-    if (timeout_occurred) {
-        //printf("sender: timeout occurred \n");
+    bool timeout = false;
+
+    struct itimerspec curr_time_ACK_recieved;
+    if(timer_gettime(tcp_timeout_timer, &curr_time_ACK_recieved) == -1) {
+        perror("timer_gettime in slow start");
+        exit(EXIT_FAILURE);
+    }
+    int time_remaining_msec = NSEC_TO_MSEC(curr_time_ACK_recieved.it_value.tv_nsec);
+
+    if (time_remaining_msec == 0) {
+        printf("sender: timeout occurred \n");
         //reset SST, dupAck
         SST = (int)CW/2;
         dupAckCounter = 0;
@@ -327,37 +361,71 @@ void checkTimer() {
 
         // move to slow start, restart timer
         currentState = slow_start;
+        printf("timer occured, about to adjust timer\n");
+
         adjust_timer(tcp_timeout_timer, TIMERTIMEOUT_MSEC);
-        //printf("sender: timeout occurred new sequence number %ld\n", packet_arr[0].seq_num);
+        printf("sender: timeout occurred new sequence number %ld\n", packet_arr[0].seq_num);
     }
 }
 
+void expandCongestionWindow(FILE *fp) {
+   //slide and expand window for new packets
+    printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
+    while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
+        char * tempBuffer = new char[PAYLOADSIZE+1];
+        getNextFileChunk(fp, tempBuffer);
+        seqNum++;
+        tcp_struct newEntry = {seqNum, tempBuffer, 0, false};
+        packet_arr.push_back(newEntry);
+        printf("Added packet %ld\n", seqNum);
+    }
+}
+
+int contractCongestionWindow(int & slideDistance, int ACKSequenceNumber) {
+    //Mark packets completed
+    int tmp = slideDistance;
+    while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
+        slideDistance++;
+    }
+    printf("slid window by (%d), completed (%ld) packets total. current packet_arr size: (%ld).\n", tmp, numPacketsCompleted, packet_arr.size());
+
+    //Find time of packet sent 
+    int tCurrent = 0;
+    if(!packet_arr.empty()) {
+       tCurrent = packet_arr[ACKSequenceNumber - (hack + 1)].timer_timestamp_msec;
+    }
+    numPacketsCompleted += slideDistance+1;
+
+    //Contract window
+    while(!packet_arr.empty() && slideDistance >= 0) {
+        printf("removing packet %ld\n", packet_arr[0].seq_num);
+        delete [] packet_arr[0].payload_content;
+        packet_arr.erase(packet_arr.begin());
+        slideDistance--;
+    }
+    printf("removed (%d) packets from packet_arr\n", tmp);
+
+    return tCurrent;
+}
+
 //First time transition: set SST/CW, resend base and expand window if needed 
-void transitionToFastRecovery(char *file_buf) {
+void transitionToFastRecovery(FILE *fp) {
     //reset state
     currentState = fast_recovery;
     SST = _floor(CW)/2;
     CW = SST + dupAckCounter;
-    ////printf("switching to fast recovery and new SST is %ld, and new CW is %f\n", SST, CW);
+    printf("switching to fast recovery and new SST is %ld, and new CW is %f\n", SST, CW);
 
 
     //resend first pcket that is causing duplicate ACK
     packet_arr[0].sent_packet = false;
     packet_arr[0].timer_timestamp_msec = 0;
 
-    //slide and expand window for new packets
-    //printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
-    while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
-        char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
-        seqNum++;
-        tcp_struct newEntry = {seqNum, nextAddress, 0, false};
-        packet_arr.push_back(newEntry);
-        //printf("Added packet %ld\n", seqNum);
-    }
-
+    //Add new packers if possible
+    expandCongestionWindow(fp);
 }
 
-void slowStart(char *file_buf, size_t ACKSequenceNumber) {
+void slowStart(FILE *fp, size_t ACKSequenceNumber) {
     
     /*
     if recieved ACK is higher than current HACK,
@@ -367,52 +435,28 @@ void slowStart(char *file_buf, size_t ACKSequenceNumber) {
         int slideDistance = 0;
         int tCurrent = 0;
         int tNext = 0;
-        //printf("(slow start) recieved ACK is higher than HACK. sliding the congestion window, incrementing CW size.\n");
+        printf("(slow start) recieved ACK is higher than HACK. sliding the congestion window, incrementing CW size.\n");
 
-        //remove acked packet
-        while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
-            slideDistance++;
-        }
+        //remove acked packets
+        contractCongestionWindow(slideDistance, ACKSequenceNumber);
 
-        if(!packet_arr.empty()) {
-            tCurrent = packet_arr[ACKSequenceNumber - (hack + 1)].timer_timestamp_msec;
-        }
-
-        numPacketsCompleted += slideDistance+1;
-
-        //int tmp = slideDistance;
-        while(!packet_arr.empty() && slideDistance >= 0) {
-            //printf("removing packet %ld\n", packet_arr[0].seq_num);
-            packet_arr.erase(packet_arr.begin());
-            slideDistance--;
-        }
-        //printf("removed (%d) packets from packet_arr\n", tmp);
-
-        //slide and expand window for new packets
-        //printf("slow start add new packets\n");f
         // increase CW based on new highest ACK. 
         CW = CW + (ACKSequenceNumber - hack);
         if(CW >= SST) {
             currentState = congestion_avoidance;
         }
-        ////printf("new CW is %f \n", CW);
-        //printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
-        while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
-            char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
-            seqNum++;
-            tcp_struct newEntry = {seqNum, nextAddress, 0, false};
-            packet_arr.push_back(newEntry);
-            //printf("Added packet %ld\n", seqNum);
-        }
+        printf("new CW is %f \n", CW);
+
+        //Add new packets based on update CW
+        expandCongestionWindow(fp);
 
         // after the packet window is added in, set the next timer value to the head of the CW window timer
-        tNext = packet_arr[0].timer_timestamp_msec;
+        if(CW >= 1) {
+            tNext = packet_arr[0].timer_timestamp_msec;
+        }
 
-        // printf("slid window by (%d), completed (%ld) packets total. current packet_arr size: (%ld).\n", tmp, numPacketsCompleted, packet_arr.size());
-        
         // calculate new timeout based on single timer equation
-        // printf("(slow start) update timer \n");
-
+        printf("(slow start) update timer \n");
         // get milliseconds left in timer
         struct itimerspec curr_time_ACK_recieved;
         if(timer_gettime(tcp_timeout_timer, &curr_time_ACK_recieved) == -1) {
@@ -422,7 +466,6 @@ void slowStart(char *file_buf, size_t ACKSequenceNumber) {
         int time_remaining_msec = NSEC_TO_MSEC(curr_time_ACK_recieved.it_value.tv_nsec);
 
         // current time + time remaining
-        // clock() + gettime()
         int alarm_time = USEC_TO_MSEC(clock()) + time_remaining_msec;
 
         // clock()
@@ -432,9 +475,7 @@ void slowStart(char *file_buf, size_t ACKSequenceNumber) {
         new_timeout = (alarm_time - current_ACK_time) + (tNext - tCurrent);
 
         // adjust timer (threadsafe)
-        pthread_mutex_lock(&timer_lock);
-        adjust_timer(tcp_timeout_timer, new_timeout);
-        pthread_mutex_unlock(&timer_lock);
+        adjust_timer(tcp_timeout_timer, max(new_timeout,0) );
 
         // reset dupAck because new hack was recieved
         dupAckCounter = 0;
@@ -443,14 +484,14 @@ void slowStart(char *file_buf, size_t ACKSequenceNumber) {
 
     else if(ACKSequenceNumber == hack) {
         dupAckCounter++;
-        //printf("new ACK has same value as hack, incrementing dupACK counter to (%ld)", dupAckCounter);
+        printf("new ACK has same value as hack, incrementing dupACK counter to (%ld)\n", dupAckCounter);
         if(dupAckCounter == DUPACKTHRESHOLD) {
-            transitionToFastRecovery(file_buf);
+            transitionToFastRecovery(fp);
         }
     }
 }
 
-void congestionAvoidance(char *file_buf, size_t ACKSequenceNumber) {
+void congestionAvoidance(FILE *fp, size_t ACKSequenceNumber) {
     /*/
     if recieved ACK is higher than current HACK,
     slide window and inc window size by 1
@@ -459,48 +500,25 @@ void congestionAvoidance(char *file_buf, size_t ACKSequenceNumber) {
         int slideDistance = 0;
         int tCurrent = 0;
         int tNext = 0;
-        //printf("(congestion avoidance) recieved ACK is higher than HACK. sliding the congestion window, incrementing CW size.\n");
+        printf("(congestion avoidance) recieved ACK is higher than HACK. sliding the congestion window, incrementing CW size.\n");
 
         //remove acked packet
-        while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
-            slideDistance++;
-        }
+        contractCongestionWindow(slideDistance, ACKSequenceNumber);
 
-        if(!packet_arr.empty()) {
-            tCurrent = packet_arr[0].timer_timestamp_msec;
-            tNext = packet_arr[0].timer_timestamp_msec;
-        }
-
-        numPacketsCompleted += slideDistance+1;
-        while(!packet_arr.empty() && slideDistance >= 0) {
-            //printf("removing packet %ld\n", packet_arr[0].seq_num);
-            packet_arr.erase(packet_arr.begin());
-            slideDistance--;
-        }
-        //printf("removed (%d) packets from packet_arr\n", tmp);
-
-        //slide and expand window for new packets
-        //printf("congestion avoidance add new packets\n");
         // increase CW based on equation from lecture. 
         for(size_t i = 0; i < ACKSequenceNumber-hack; i++) {
             CW = CW + 1/_floor(CW);
         }
-        ////printf("new CW is %f \n", CW);
-        //printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
-        while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
-            char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
-            seqNum++;
-            tcp_struct newEntry = {seqNum, nextAddress, 0, false};
-            packet_arr.push_back(newEntry);
-            //printf("Added packet %ld\n", seqNum);
+
+        //slide and expand window for new packets
+        expandCongestionWindow(fp);
+
+        if(CW >= 1) {
+            tNext = packet_arr[0].timer_timestamp_msec;
         }
 
-        //printf("slid window by (%d), completed (%ld) packets total. current packet_arr size: (%ld).\n", tmp, numPacketsCompleted, packet_arr.size());
-        
         // calculate new timeout based on single timer equation
-        //printf("(congestion avoidance) update timer \n");
-
-        // get milliseconds left in timer
+        printf("(congestion avoidance) update timer \n");
         struct itimerspec curr_time_ACK_recieved;
         if(timer_gettime(tcp_timeout_timer, &curr_time_ACK_recieved) == -1) {
             perror("timer_gettime in congestion avoidance");
@@ -519,9 +537,7 @@ void congestionAvoidance(char *file_buf, size_t ACKSequenceNumber) {
         new_timeout = (alarm_time - current_ACK_time) + (tNext - tCurrent);
 
         // adjust timer (threadsafe)
-        pthread_mutex_lock(&timer_lock);
-        adjust_timer(tcp_timeout_timer, new_timeout);
-        pthread_mutex_unlock(&timer_lock);
+        adjust_timer(tcp_timeout_timer, max(new_timeout,0));
 
         // reset dupAck because new hack was recieved
         dupAckCounter = 0;
@@ -530,15 +546,15 @@ void congestionAvoidance(char *file_buf, size_t ACKSequenceNumber) {
 
     else if(ACKSequenceNumber == hack) {
         dupAckCounter++;
-        //printf("new ACK has same value as hack, incrementing dupACK counter to (%ld)", dupAckCounter);
+        printf("new ACK has same value as hack, incrementing dupACK counter to (%ld)", dupAckCounter);
         if(dupAckCounter == DUPACKTHRESHOLD) {
-            transitionToFastRecovery(file_buf);
+            transitionToFastRecovery(fp);
         }
     }
 }
 
 //core function for when currently in fast recovery two cases: Handle another duplicate ACK and Handle newACK 
-void fastRecovery(char *file_buf, size_t ACKSequenceNumber) {
+void fastRecovery(FILE *fp, size_t ACKSequenceNumber) {
     /*
     if recieved ACK is higher than current HACK,
     slide window and inc window size by 1
@@ -547,24 +563,10 @@ void fastRecovery(char *file_buf, size_t ACKSequenceNumber) {
         int slideDistance = 0;
         int tCurrent = 0;
         int tNext = 0;
-        //printf("(fast recovery) recieved ACK is higher than HACK. Transition out of fast recovery.\n");
+        printf("(fast recovery) recieved ACK is higher than HACK. Transition out of fast recovery.\n");
 
         //remove acked packet
-        while(slideDistance < packet_arr.size() && packet_arr[slideDistance].seq_num < ACKSequenceNumber) {
-            slideDistance++;
-        }
-        if(!packet_arr.empty()) {
-            tCurrent = packet_arr[0].timer_timestamp_msec;
-            tNext = packet_arr[0].timer_timestamp_msec;
-        }
-        numPacketsCompleted += slideDistance+1;
-
-        while(!packet_arr.empty() && slideDistance >= 0) {
-            //printf("removing packet %ld\n", packet_arr[0].seq_num);
-            packet_arr.erase(packet_arr.begin());
-            slideDistance--;
-        }
-        //printf("removed (%d) packets from packet_arr\n", tmp);
+        contractCongestionWindow(slideDistance, ACKSequenceNumber);
 
         //reset important variables
         CW = SST;
@@ -572,18 +574,11 @@ void fastRecovery(char *file_buf, size_t ACKSequenceNumber) {
         currentState = congestion_avoidance;
         
         //slide and expand window for new packets
-        //printf("fast recovery add new packets if possible\n");
-        //printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
-        while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
-            char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
-            seqNum++;
-            tcp_struct newEntry = {seqNum, nextAddress, 0, false};
-            packet_arr.push_back(newEntry);
-            //printf("Added packet %ld\n", seqNum);
+        expandCongestionWindow(fp);
+        if(CW >= 1) {
+            tNext = packet_arr[0].timer_timestamp_msec;
         }
 
-        //printf("slid window by (%d), completed (%ld) packets total. current packet_arr size: (%ld).\n", tmp, numPacketsCompleted, packet_arr.size());
-        
         // calculate new timeout based on single timer equation
         printf("(fast recovery) update timer \n");
 
@@ -596,7 +591,6 @@ void fastRecovery(char *file_buf, size_t ACKSequenceNumber) {
         int time_remaining_msec = NSEC_TO_MSEC(curr_time_ACK_recieved.it_value.tv_nsec);
 
         // current time + time remaining
-        // clock() + gettime()
         int alarm_time = USEC_TO_MSEC(clock()) + time_remaining_msec;
 
         // clock()
@@ -606,85 +600,90 @@ void fastRecovery(char *file_buf, size_t ACKSequenceNumber) {
         new_timeout = (alarm_time - current_ACK_time) + (tNext - tCurrent);
 
         // adjust timer (threadsafe)
-        pthread_mutex_lock(&timer_lock);
-        adjust_timer(tcp_timeout_timer, new_timeout);
-        pthread_mutex_unlock(&timer_lock);
+        adjust_timer(tcp_timeout_timer, max(new_timeout,0));
 
         // reset highest ack recieved 
         hack = ACKSequenceNumber;
     }
 
     else if(ACKSequenceNumber == hack) {
-        //printf("duplicate ACK recieved in fast recovery mode %ld\n", ACKSequenceNumber);
+        printf("duplicate ACK recieved in fast recovery mode %ld\n", ACKSequenceNumber);
         //increase window by 1 because packets are draining in network
         dupAckCounter++;
         CW +=1;
 
         //send new packets if possible
-        //printf("adding (%ld) packets to packet arr.\n", _floor(CW) - packet_arr.size());
-        while(packet_arr.size() < _floor(CW) && seqNum < total_packets_to_send && numPacketsCompleted < total_packets_to_send) {
-            char* nextAddress = &file_buf[(seqNum)*PAYLOADSIZE];
-            seqNum++;
-            tcp_struct newEntry = {seqNum, nextAddress, 0, false};
-            packet_arr.push_back(newEntry);
-            //printf("Added packet %ld\n", seqNum);
-        }
+        expandCongestionWindow(fp);
     }
 }
 
-void recievePacket(char *control_buf, char *file_buf) {
+void recievePacket(char *control_buf, FILE *fp) {
     //get packet
     int currentBytesRecieved = 0;
     int totalBytesACKChunk = CONTROLBITLENGTH;
     memset(control_buf, '\0', CONTROLBITLENGTH);
 
-    // Set timeout
-    struct timeval recvfrom_timeout;
-    recvfrom_timeout.tv_usec = MSEC_TO_USEC(new_timeout);
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(s, &read_fds);
-    int select_ret = select(s + 1, &read_fds, NULL, NULL, &recvfrom_timeout);
+    printf("setting timeout for recv\n");
 
-    if(select_ret > 0) {
-        //printf("socket recieved ACK\n");
-        while(currentBytesRecieved != totalBytesACKChunk) {
-            //printf("recieving ACK from socket to control_buf\n");
-            if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk - currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
-                    if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-                        // handle timeout
-                        //printf("recvfrom() timed out\n");
-                        break;
-                    } else {
-                        // handle other errors
-                        perror("chunk sending failure in phase 2.\n");
-                        exit(1);
-                    }
-            }
+    // Set timeout
+    size_t timeoutVal = TIMERTIMEOUT_MSEC;
+    if(new_timeout > 0) {
+        timeoutVal = new_timeout;
+    }
+    struct timeval timeout;
+    timeout.tv_sec = 0;  // timeout in seconds
+    timeout.tv_usec = timeoutVal * 1000; // and microseconds
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        socketError1 = "setsockopt";
+        diep(socketError1);
+    }
+
+    printf("reciving all available packets\n");
+
+    //printf("socket recieved ACK\n");
+    while(currentBytesRecieved != totalBytesACKChunk) {
+        printf("recieving ACK from socket to control_buf\n");
+        if((currentBytesRecieved += recvfrom(s, &control_buf[currentBytesRecieved], totalBytesACKChunk - currentBytesRecieved, 0, &addr, &fromlen)) == -1) {
+                if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+                    // handle timeout
+                    printf("recvfrom() timed out\n");
+                    break;
+                } else {
+                    // handle other errors
+                    perror("chunk sending failure in phase 2.\n");
+                    exit(1);
+                }
         }
     }
     
     size_t ACKSequenceNumber = 0;
     int success = sscanf(control_buf, "ACK %ld", &ACKSequenceNumber);
     if(success != 1) {
-        // //printf("ACK not recieved\n");
-        // //printf("control buf looks like this: <BOS>%s<EOS>\n", control_buf);
+        printf("ACK not recieved\n");
+        printf("control buf looks like this: <BOS>%s<EOS>\n", control_buf);
         return;
     } else {
-        //printf("ACK recieved for packet (%ld)! control buf looks like this: <BOS>%s<EOS>\n", ACKSequenceNumber, control_buf);
+        printf("ACK recieved for packet (%ld)! control buf looks like this: <BOS>%s<EOS>\n", ACKSequenceNumber, control_buf);
+    }
+
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        socketError1 = "setsockopt";
+        diep(socketError1);
     }
 
     if(currentState == slow_start) {
-        //printf("currently in slow start state\n");
-        slowStart(file_buf, ACKSequenceNumber);
+        printf("currently in slow start state\n");
+        slowStart(fp, ACKSequenceNumber);
     }
     else if(currentState == congestion_avoidance) {
-        //printf("currently in congestion avoidance state\n");
-        congestionAvoidance(file_buf, ACKSequenceNumber);
+        printf("currently in congestion avoidance state\n");
+        congestionAvoidance(fp, ACKSequenceNumber);
     }
     else {
-        //printf("currently in fast recovery state\n");
-        fastRecovery(file_buf, ACKSequenceNumber);
+        printf("currently in fast recovery state\n");
+        fastRecovery(fp, ACKSequenceNumber);
     }
 }
 
@@ -712,20 +711,18 @@ void start_timer(timer_t timer_id, int expiration_msec) {
 
 void timer_expiration_handler(union sigval sv) {
     pthread_mutex_lock(&timer_lock);
-    // printf("timeout handler: timeout occurred!\n");
+    printf("timeout handler: timeout occurred!\n");
     timeout_occurred = true;
-    pthread_mutex_lock(&timer_lock);
+    pthread_mutex_unlock(&timer_lock);
+    printf("timeout handler: unlocked\n");
 }
 
 
-void create_timer(void (*handler)(union sigval)) {
+void create_timer() {
     struct sigevent se;
 
     // Setup sigevent structure
-    se.sigev_notify = SIGEV_THREAD;  // Notify using thread
-    se.sigev_notify_function = handler;  // Function to execute
-    se.sigev_value.sival_ptr = &tcp_timeout_timer;  // Data to pass to handler function
-    se.sigev_notify_attributes = NULL;  // Thread attributes (can be NULL)
+    se.sigev_notify = SIGEV_NONE;
 
     // Create timer
     if (timer_create(CLOCK_REALTIME, &se, &tcp_timeout_timer) == -1) {
@@ -736,14 +733,6 @@ void create_timer(void (*handler)(union sigval)) {
 
 
 void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* filename, unsigned long long int bytesToTransfer) {
-    //Open the file
-    FILE *fp;
-    char* file_buf = NULL;
-    fp = fopen(filename, "rb");
-    if (fp == NULL) {
-        //printf("Could not open file to send.");
-        exit(1);
-    }
 
 	/* Determine how many bytes to transfer */
     slen = sizeof (si_other);
@@ -760,26 +749,41 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         fprintf(stderr, "inet_aton() failed\n");
         exit(1);
     }
-    //printf("socket created\n"):
+    printf("socket created\n");
     
-    // read bytesToTransfer bytes from file to buffer
-    file_buf = new char[MAXDATASIZE];
-    //printf("file buffer address %p\n", file_buf);
-    fseek(fp, 0L, SEEK_END);
-    unsigned long long int sizeOfFile = ftell(fp);
-    rewind(fp);
-    if(bytesToTransfer > sizeOfFile) {
-        bytesToTransfer = sizeOfFile;
-    }
-
-    // read file into buffer
-    size_t bytesRead = fread(file_buf, 1, bytesToTransfer, fp);
-    if (bytesRead != bytesToTransfer) {
-        perror("Failed to read the specified number of bytes");
+    // safely find size of file
+    char* file_buf = NULL;
+    file_buf = new char[MAXDATASIZE+1];
+    std::ifstream file(std::string(filename), std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error opening file" << std::endl;
         delete [] file_buf;
-        fclose(fp);
+        return;
+    }
+    std::streamsize totalBytesRead = 0;
+    while (file.read(file_buf, MAXDATASIZE) || file.gcount()) {
+        totalBytesRead += file.gcount();
+    }
+    file.close();
+    delete[] file_buf;
+    // Can't read file contents that don't exist 
+    if(bytesToTransfer > totalBytesRead) {
+        bytesToTransfer = static_cast<unsigned long long int>(totalBytesRead);
+    }
+    //keep track of total number of packets to send and size of last packet
+    total_packets_to_send = (bytesToTransfer+PAYLOADSIZE-1) / PAYLOADSIZE;
+    last_packet_size = bytesToTransfer % PAYLOADSIZE;
+    printf("total_packets_to_send %ld and last_packet_size %ld\n", total_packets_to_send, last_packet_size);
+
+    //Open the file to read contents as needed
+    FILE *fp;
+    fp = fopen(filename, "rb");
+    if (fp == NULL) {
+        printf("Could not open file to send.");
         exit(1);
     }
+
+    createConnection();
 
     // init mutex for timer
     if (pthread_mutex_init(&timer_lock, NULL) != 0) {
@@ -787,35 +791,30 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         exit(1);
     }
 
-    //keep track of total number of packets sent and recieved ack
-    total_packets_to_send = _ceil( (double) bytesRead / PAYLOADSIZE);
-    last_packet_size = bytesRead % PAYLOADSIZE;
-
-    createConnection();
-
     //Seperate buffer for control bits like sequence number, startup, and close
     char control_buf[CONTROLBITLENGTH];
     // CONTROLBITLENGTH is the num bits we have in each chunk to enforce TCP
     char chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE+1];
     chunk_buf[CONTROLBITLENGTH + PAYLOADSIZE] = '\0';
 
-
     //Capture program time (in microseconds)
     timer = USEC_TO_MSEC(clock());
 
     // Create a periodic timer
-    create_timer(timer_expiration_handler);
+    create_timer();
 
     // start timer (timeout timer)
     start_timer(tcp_timeout_timer, TIMERTIMEOUT_MSEC);
 
     //Load first packet to be sent
-    tcp_struct firstPacket = {seqNum, file_buf, 0, false};
+    char * firstBuffer = new char[PAYLOADSIZE+1];
+    getNextFileChunk(fp, firstBuffer);
+    tcp_struct firstPacket = {seqNum, firstBuffer, 0, false};
     packet_arr.push_back(firstPacket);
 
     // populate chunk buf from buffer
     while (numPacketsCompleted < total_packets_to_send) {
-        ////printf("number of packets completed %ld and total number of packets %ld\n", numPacketsCompleted, total_packets_to_send);
+        printf("number of packets completed %ld and total number of packets %ld\n", numPacketsCompleted, total_packets_to_send);
         //check timeout
         checkTimer();
 
@@ -823,15 +822,16 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
         sendPackets(chunk_buf, control_buf);
 
         //recieve packets
-        recievePacket(control_buf, file_buf);
+        recievePacket(control_buf, fp);
     }
 
     //send final messages to close the connection
     closeConnection();
 
-    //printf("Closing the socket\n");
-    delete[] file_buf;
     pthread_mutex_destroy(&timer_lock);
+
+    printf("Closing the socket\n");
+    fclose(fp);
     close(s);
     return;
 }
